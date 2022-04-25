@@ -1,0 +1,1 @@
+"C:\Users\Alex\Desktop\pageant.exe" "C:\Users\Alex\Desktop\sshprivate.ppk"

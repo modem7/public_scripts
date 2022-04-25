@@ -1,0 +1,7 @@
+on proxmox
+
+for i in $( seq -f "%02g" 07 13 ); do sudo /usr/sbin/qm start 11$i ; done
+
+for i in $( seq -f "%02g" 07 13 ); do sudo /usr/sbin/qm reboot 11$i ; done
+
+for i in $( seq -f "%02g" 07 13 ); do sudo /usr/sbin/qm shutdown 11$i ; done

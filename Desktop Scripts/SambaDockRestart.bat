@@ -1,0 +1,2 @@
+"C:\Users\Alex\Desktop\Desktop Content\Pageant files\pageant.exe" "C:\Users\Alex\Desktop\Desktop Content\Pageant files\sshprivate.ppk"
+"G:\stuff to go back in old hd\plink.exe" -v -l alex -batch -load AmahiModified -ssh -t -t "sudo docker container restart Sonarr Radarr Tdarr Tdarr-node Bazarr Ombi Overseer Plex"

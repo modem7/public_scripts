@@ -1,0 +1,1 @@
+sudo pkill -f teleport && sudo rm -rf /var/lib/teleport /etc/teleport.yaml /usr/local/bin/teleport /usr/local/bin/tctl /usr/local/bin/tsh && sudo apt purge -y teleport

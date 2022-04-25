@@ -1,0 +1,13 @@
+watch -d greyhole --view-queue
+
+tail -f /var/log/greyhole.log
+greyhole -L
+
+
+sudo greyhole -fy --dir=/var/hda/files/drives/drive12/Greyhole/tv
+
+sudo greyhole -fy --dir=/var/hda/files/drives/drive12/Greyhole/movies
+
+sudo greyhole -fy --dir=/var/hda/files/drives/drive12/Greyhole/anime
+
+sudo greyhole -fy --dir=/var/hda/files/drives/drive12/Greyhole/Test

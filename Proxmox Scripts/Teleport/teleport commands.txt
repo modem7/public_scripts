@@ -1,0 +1,12 @@
+tsh login --proxy=teleport.modem7.com --auth=github
+
+tsh ls -v
+tsh status
+tsh clusters
+
+tsh ssh -l modem7 modem7@Bastion-Test
+
+tsh scp C:\Users\alex.lane\Desktop\test.txt modem7@Bastion-Test:/home/modem7/
+
+
+tsh play 7b54d43a-d32d-41ab-a1fd-3ae9df959138

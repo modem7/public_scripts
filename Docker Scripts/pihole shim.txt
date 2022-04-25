@@ -1,0 +1,3 @@
+sudo ip link add pihole-shim link ens11 type macvlan mode bridge; sudo ip addr add 192.168.0.49 dev pihole-shim; sudo ip link set pihole-shim up; sudo ip route add 192.168.0.2 dev pihole-shim
+
+#https://community.ui.com/questions/How-To-Unifi-Contoller-Docker-home-network/fc6a9441-94b0-48b0-801a-6f38e2d4bb21

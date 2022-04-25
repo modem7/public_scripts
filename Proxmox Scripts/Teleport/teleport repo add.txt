@@ -1,0 +1,6 @@
+sudo curl https://deb.releases.teleport.dev/teleport-pubkey.asc \
+          -o /usr/share/keyrings/teleport-archive-keyring.asc && \
+sudo touch /etc/apt/sources.list.d/teleport.list && \
+echo 'deb [signed-by=/usr/share/keyrings/teleport-archive-keyring.asc] https://deb.releases.teleport.dev/ stable main' | sudo tee -a /etc/apt/sources.list.d/teleport.list && \
+sudo apt-get update && \
+sudo apt-get install teleport

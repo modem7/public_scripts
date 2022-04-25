@@ -1,0 +1,1 @@
+rpm -Uvh --oldpackage [downloaded_lower_version_package]

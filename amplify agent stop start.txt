@@ -1,0 +1,10 @@
+ To start the Amplify Agent use:
+
+sudo mkdir -p /var/run/amplify-agent
+sudo chmod 755 /var/run/amplify-agent
+sudo chown www-data:adm /var/run/amplify-agent
+sudo -u www-data python2.7 /usr/bin/nginx-amplify-agent.py start --config=/etc/amplify-agent/agent.conf --pid=/var/run/amplify-agent/amplify-agent.pid
+
+ To stop the Amplify Agent use:
+
+sudo -u www-data python2.7 /usr/bin/nginx-amplify-agent.py stop --config=/etc/amplify-agent/agent.conf --pid=/var/run/amplify-agent/amplify-agent.pid

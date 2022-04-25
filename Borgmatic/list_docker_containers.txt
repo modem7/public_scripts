@@ -1,0 +1,16 @@
+docker ps -a --format "table {{.Names}}" | (read -r; printf "%s\n" "$REPLY"; sort) >> /var/hda/files/drives/drive12/downloads/container_names.txt
+
+Press Ctrl+H to bring up the Find/Replace Dialog.
+Choose the Regular expression option near the bottom of the dialog.
+To add a word, such as test, at the beginning of each line:
+
+Type ^ in the Find what textbox
+Type test in the Replace with textbox
+Place cursor in the first line of the file to ensure all lines are affected
+Click Replace All button
+To add a word, such as test, at the end of each line:
+
+Type $ in the Find what textbox
+Type test in the Replace with textbox
+Place cursor in the first line of the file to ensure all lines are affected
+Click Replace All button
