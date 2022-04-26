@@ -1,6 +1,6 @@
 #!/bin/bash
 # Please install the following before running this script:
-# curl and xclip
+# curl
 
 HASTE_URL="https://hastebin.mydomain.com/"
 HASTE_UPLOAD_URL=$HASTE_URL'documents/'
