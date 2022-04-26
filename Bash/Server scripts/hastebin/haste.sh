@@ -1,54 +1,43 @@
 #!/bin/bash
-# Please install the following before running this script:
-# curl
-
-HASTE_URL="https://hastebin.mydomain.com/"
-HASTE_UPLOAD_URL=$HASTE_URL'documents/'
-
-raw=false
-
-function help() {
-    echo ""
-    echo "  -r, --raw"
-    echo "  prints the raw link"
-    echo ""
-    exit
-}
-
-function haste() {
-    contents=$(cat $1)
-
-    echo $(curl -X POST -s -d "$contents" $HASTE_UPLOAD_URL)
-}
-
-function makeUrl() {
-    code=$(echo "$1" | awk -F '"' '{print $4}')
-
-    if [ $2 = true ]; then
-        url=$HASTE_URL'raw/'$code
-    else
-        url=$HASTE_URL$code
-    fi
-
-    echo $url
-}
-
-until [ -z $1 ]; do
-    case $1 in
-    -h | --help)
-        help
-        ;;
-
-    -r | --raw)
-        raw=true
-        ;;
-
-    *)
-        result=$(haste $1)
-        url=$(makeUrl $result $raw)
-
-        echo $url
-        ;;
-    esac
-    shift
-done
+output=""
+returnfile=""
+contents=""
+if (( $# == 0 )) && [[ $(printf "%s" "$0" | wc -c) > 0 ]]
+	then
+	contents=$0
+elif (( $# != 1 )) || [[ $1 =~ ^(-h|--help)$ ]]
+	then
+	echo "Usage: $0 FILE"
+	echo "Upload contents of plaintext document to hastebin.mydomain.com."
+	echo "Invocation with no arguments takes input from stdin or pipe."
+	echo "Terminate stdin by EOF (Ctrl-D)."
+	exit 1
+elif [[ -e $1 && ! -f $1 ]]
+	then
+	echo "Error: Not a regular file."
+	exit 1
+elif [[ ! -e $1 ]]
+then
+	echo "Error: No such file."
+	exit 1
+elif (( $(stat -c %s $1) > (512*1024**1) ))
+	then
+	echo "Error: File must be smaller than 512 KiB."
+	exit 1
+fi
+if [[ -n "$contents" ]] || [[ $(printf "%s" "$contents" | wc -c) < 1 ]]
+	then
+	contents=$(cat $1)
+fi
+output=$(curl -s -f -X POST "https://hastebin.mydomain.com/documents" -d "$contents")
+if (( $? == 0 )) && [[ $output =~ \"key\" ]]
+	then
+	returnfile=$(sed 's/^.*"key":"/https:\/\/hastebin.mydomain.com\//;s/".*$//' <<< "$output")
+	if [[ -n $returnfile ]]
+		then
+		echo "$returnfile"
+		exit 0
+	fi
+fi
+echo "Upload failed."
+exit 1
