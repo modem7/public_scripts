@@ -21,13 +21,18 @@ if [ "" = "$PKG_OK" ]; then
 fi
 
 # Image variables
-SRC_IMG="https://cloud-images.ubuntu.com/focal/current/focal-server-cloudimg-amd64.img"
+SRC_URL="https://cloud-images.ubuntu.com/focal/current/"
+SRC_IMG="focal-server-cloudimg-amd64.img"
 IMG_NAME="focal-server-cloudimg-amd64.qcow2"
 WORK_DIR="/tmp"
+DELETEIMG="yes" # Set to no if you don't want the image and qcow files to be deleted (useful in Dev)
 
 # Download image
 cd $WORK_DIR
-wget -O $WORK_DIR/$IMG_NAME $SRC_IMG
+wget -N $SRC_URL$SRC_IMG
+
+# Copy downloaded img to qcow2 format
+cp $SRC_IMG $IMG_NAME
 
 # Image variables
 OSNAME="Ubuntu 20.04"
@@ -55,9 +60,29 @@ AGENT_ENABLE="1" #change to 0 if you don't want the guest agent
 FSTRIM="1"
 CITYPE="nocloud"
 BIOS="ovmf" # Choose between ovmf or seabios
+VIRTPKG="qemu-guest-agent,cloud-utils,cloud-guest-utils"
+TZ="Europe/London"
+SSHKEY="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOFLnUCnFyoONBwVMs1Gj4EqERx+Pc81dyhF6IuF26WM proxvms" #Unset if you don't want to use this.
+SETX11="yes" # "yes" or "no" required
+X11LAYOUT="gb"
+X11MODEL="pc105"
+LOCALLANG="en_GB.UTF-8"
 
 # install qemu-guest-agent inside image
-virt-customize --install qemu-guest-agent -a $IMG_NAME
+if [ -n "${TZ+set}" ]; then
+  echo "### Setting up TZ ###"
+  virt-customize -a $IMG_NAME --timezone $TZ
+fi
+
+if [ $SETX11 == 'yes' ]; then
+  echo "### Setting up keyboard language and locale ###"
+  virt-customize -a $IMG_NAME \
+  --firstboot-command "localectl set-locale LANG=$LOCALLANG" \
+  --firstboot-command "localectl set-x11-keymap $X11LAYOUT $X11MODEL"
+fi
+
+echo "### Installing Packages ###"
+virt-customize -a $IMG_NAME --install $VIRTPKG
 
 # create VM
 qm create $VMID --name $TEMPL_NAME --memory $MEM --balloon $BALLOON --cores $CORES --bios $BIOS --net0 virtio,bridge=${NET_BRIDGE}${VLAN:+,tag=$VLAN}
@@ -72,7 +97,20 @@ qm set $VMID --ciuser $CLOUD_USER
 qm set $VMID --cipassword $CLOUD_PASSWORD
 qm set $VMID --boot c --bootdisk scsi0
 qm set $VMID --ipconfig0 ip=dhcp
+# Apply SSH Key if the value is set
+if [ -n "${SSHKEY+set}" ]; then
+  tmpfile=$(mktemp /tmp/sshkey.XXX.pub)
+  echo $SSHKEY > $tmpfile
+  qm set $VMID --sshkey $tmpfile
+  rm -v $tmpfile
+fi
 qm resize $VMID scsi0 $DISK_SIZE
 
-# Delete previously downloaded file
-rm -v $WORK_DIR/$IMG_NAME
+# Delete original image file
+#rm -v $WORK_DIR/$IMG_NAME
+if [ $DELETEIMG == 'yes' ]; then
+  rm -v $IMG_NAME
+  rm -v $SRC_IMG
+else
+  echo "Image not deleted"
+fi
