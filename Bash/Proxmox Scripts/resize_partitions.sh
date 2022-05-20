@@ -16,6 +16,19 @@ cecho(){
 
 ### Usage ###
 
+### Requirements ###
+## Needs cloud-utils package to install "growpart"
+
+REQUIRED_PKG="cloud-utils"
+PKG_OK=$(dpkg --get-selections $REQUIRED_PKG 2>&1 | grep -v 'install$' | awk '{ print $6 }')
+cecho "YELLOW" "Checking for $REQUIRED_PKG"
+if [ "$REQUIRED_PKG" = "$PKG_OK" ]; then
+  cecho "RED" "$REQUIRED_PKG not installed. Please run apt-get install $REQUIRED_PKG to continue."
+  exit 1
+else
+  cecho "GREEN" "$REQUIRED_PKG installed. Continuing."
+fi
+
 if [[ $# -eq 0 ]] ; then
     echo 'Please tell me the device to resize as the first parameter, like /dev/sda'
     cecho "YELLOW" "Usage: ./size.sh <device> <partition number>"
