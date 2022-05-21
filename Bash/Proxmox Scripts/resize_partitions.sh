@@ -70,10 +70,10 @@ cecho "GREEN" "[ok] Will resize from ${CURRENTSIZE}MB to ${MAXSIZEMB}MB "
 if [[ "$APPLY" == "apply" ]] ; then
   echo "[ok] applying resize operation.."
 
-echo "Growing Partition"
+echo "Extending Partition"
 growpart $DEVICE $PARTNR
 
-echo "Resizing Partition"
+echo "Extending Filesystem"
 resize2fs -f $DEVICE$PARTNR
 
   echo "[done]"
