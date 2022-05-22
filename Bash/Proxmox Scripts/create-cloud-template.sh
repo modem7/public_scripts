@@ -58,7 +58,6 @@ CORES="2"
 OS_TYPE="l26"
 AGENT_ENABLE="1" #change to 0 if you don't want the guest agent
 FSTRIM="1"
-CITYPE="nocloud"
 BIOS="ovmf" # Choose between ovmf or seabios
 VIRTPKG="qemu-guest-agent,cloud-utils,cloud-guest-utils"
 TZ="Europe/London"
@@ -92,7 +91,6 @@ qm importdisk $VMID $WORK_DIR/$IMG_NAME $DISK_STOR -format qcow2
 qm set $VMID --scsihw virtio-scsi-pci --scsi0 $DISK_STOR:$VMID/vm-$VMID-disk-0.qcow2,cache=writethrough,discard=on
 qm set $VMID --scsi1 $DISK_STOR:cloudinit
 qm set $VMID --efidisk0 $DISK_STOR:0,efitype=4m,,format=qcow2,pre-enrolled-keys=1,size=528K
-qm set $VMID --citype $CITYPE
 qm set $VMID --ciuser $CLOUD_USER
 qm set $VMID --cipassword $CLOUD_PASSWORD
 qm set $VMID --boot c --bootdisk scsi0
