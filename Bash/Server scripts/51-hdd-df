@@ -1,0 +1,10 @@
+#! /bin/sh
+# Script to show disk utilisation during login.
+# Location /etc/update-motd.d/51-hdd-df
+# Note that there is intentially no extension
+# Make sure to chmod +x the script
+    echo
+    echo -n "Disk Space Utilisation"
+    echo
+df -h | grep -v 'none\|tmpfs\|udev\|//127.*\|overlay' | ( read header ; echo "$header" ; sort -rn -k 5)
+## done

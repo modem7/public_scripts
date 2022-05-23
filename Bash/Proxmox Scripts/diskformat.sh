@@ -55,7 +55,7 @@ if [[ ${#PARTITION_NAME} -ne 4 ]]; then
 fi;
 
 ## Format it as ext4
-mkfs.ext4 -m 2 -T largefile4 "/dev/$PARTITION_NAME"
+mkfs.ext4 -m 2 "/dev/$PARTITION_NAME"
 
 ## Create a mount directory at /data if does not exist
 mkdir -p "${MOUNT_TO_DIR}"
