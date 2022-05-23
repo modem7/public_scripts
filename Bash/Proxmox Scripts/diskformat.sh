@@ -45,7 +45,7 @@ parted --script -a optimal ${BLOCK_DEVICE_PATH} mkpart primary ext4 0% 100%
 echo "Sleeping 5 seconds"
 sleep 5;
 
-## PARTITIONNAME WITHOUR '/dev' 
+## PARTITIONNAME WITHOUT '/dev' 
 PARTITION_NAME=`lsblk -l ${BLOCK_DEVICE_PATH} | tail -1 | awk '{print $1}'`
 
 ## SAFETY CHECK ###########################################################
@@ -60,9 +60,12 @@ mkfs.ext4 -m 2 "/dev/$PARTITION_NAME"
 ## Create a mount directory at /data if does not exist
 mkdir -p "${MOUNT_TO_DIR}"
 
+
 # Mount it in /etc/fstab
 UUID_STRING=`blkid -o export /dev/$PARTITION_NAME | grep "^UUID"`
-echo -e "\n$UUID_STRING ${MOUNT_TO_DIR} ext4 defaults,nofail 0 0" >> /etc/fstab
+FSTABCOM=`sudo lshw -class disk -businfo | grep $BLOCK_DEVICE_PATH | awk '{$2=$3=$4=""; print $0}'`
+echo -e "\n###$FSTABCOM" >> /etc/fstab
+echo -e "$UUID_STRING ${MOUNT_TO_DIR} ext4 defaults,nofail 0 0" >> /etc/fstab
 
 # Run mount -a
 mount -a
