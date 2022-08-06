@@ -13,18 +13,23 @@
 ##   Handle line endings automatically for files detected as
 ##   text and leave all files detected as binary untouched.
 ##   This will handle all files NOT defined below.
-*                 text=auto
+*                 text eol=lf
 
 # Source code
 *.bash            text eol=lf
 *.bat             text eol=crlf
 *.cmd             text eol=crlf
 *.coffee          text
+*.cpp             text diff=cpp
+*.cs              text diff=csharp
 *.css             text diff=css
+*.go              text diff=golang
+*.h               text diff=cpp
 *.htm             text diff=html
 *.html            text diff=html
 *.inc             text
 *.ini             text
+*.java            text diff=java
 *.js              text
 *.json            text
 *.jsx             text
@@ -38,19 +43,23 @@
 *.ps1             text eol=crlf
 *.py              text diff=python
 *.rb              text diff=ruby
+*.rs              text diff=rust
+*.ruby            text diff=ruby
 *.sass            text
 *.scm             text
 *.scss            text diff=css
-*.sh              text eol=lf
-.husky/*          text eol=lf
+*.sh              text diff=bash
+*.sh              text diff=bash
 *.sql             text
 *.styl            text
 *.tag             text
 *.ts              text
 *.tsx             text
-*.xml             text
-*.xhtml           text diff=html
 *.whl             binary
+*.xhtml           text diff=html
+*.xml             text
+.husky/*          text eol=lf
+Gemfile           text diff=ruby
 
 # Docker
 Dockerfile        text
@@ -66,6 +75,7 @@ Dockerfile        text
 *.mdtxt           text
 *.mdtext          text
 *.txt             text
+*.wakatime-project text
 AUTHORS           text
 CHANGELOG         text
 CHANGES           text
@@ -130,65 +140,72 @@ makefile          text
 Procfile          text
 
 # Graphics
-*.ai              binary
-*.bmp             binary
+*.ai              binary diff=exif
+*.bmp             binary diff=exif
 *.eps             binary
-*.gif             binary
+*.gif             binary diff=exif
 *.gifv            binary
+*.hqx             binary
+*.icns            binary
 *.ico             binary
 *.jng             binary
 *.jp2             binary
-*.jpg             binary
-*.jpeg            binary
+*.jpeg            binary diff=exif
+*.jpg             binary diff=exif
 *.jpx             binary
 *.jxr             binary
 *.pdf             binary
-*.png             binary
+*.png             binary diff=exif
 *.psb             binary
 *.psd             binary
- *.svg            binary
+*.psd             binary diff=exif
+*.svg             text
 *.svgz            binary
-*.tif             binary
-*.tiff            binary
+*.tif             binary diff=exif
+*.tiff            binary diff=exif
 *.wbmp            binary
 *.webp            binary
 
 # Audio
-*.kar             binary
-*.m4a             binary
-*.mid             binary
-*.midi            binary
-*.mp3             binary
-*.ogg             binary
-*.ra              binary
+*.kar             binary diff=exif
+*.m4a             binary diff=exif
+*.mid             binary diff=exif
+*.midi            binary diff=exif
+*.mp3             binary diff=exif
+*.ogg             binary diff=exif
+*.ra              binary diff=exif
 
 # Video
-*.3gpp            binary
-*.3gp             binary
-*.as              binary
-*.asf             binary
-*.asx             binary
-*.avi             binary
-*.fla             binary
-*.flv             binary
-*.m4v             binary
-*.mng             binary
-*.mov             binary
-*.mp4             binary
-*.mpeg            binary
-*.mpg             binary
-*.ogv             binary
-*.swc             binary
-*.swf             binary
-*.webm            binary
+*.3gpp            binary diff=exif
+*.3gp             binary diff=exif
+*.as              binary diff=exif
+*.asf             binary diff=exif
+*.asx             binary diff=exif
+*.avi             binary diff=exif
+*.fla             binary diff=exif
+*.flv             binary diff=exif
+*.m4v             binary diff=exif
+*.mng             binary diff=exif
+*.mov             binary diff=exif
+*.mp4             binary diff=exif
+*.mpeg            binary diff=exif
+*.mpg             binary diff=exif
+*.ogv             binary diff=exif
+*.swc             binary diff=exif
+*.swf             binary diff=exif
+*.webm            binary diff=exif
 
 # Archives
 *.7z              binary
-*.gz              binary
+*.cab             binary
+*.ear             binary
+*.gz              binary diff=exif
 *.jar             binary
-*.rar             binary
+*.rar             binary diff=exif
 *.tar             binary
-*.zip             binary
+*.tgz             binary
+*.war             binary
+*.zip             binary diff=exif
 
 # Fonts
 *.ttf             binary
@@ -208,25 +225,47 @@ Procfile          text
 *.*ignore         text
 
 # Documents
-*.bibtex          text diff=bibtex
-*.doc             diff=astextplain
-*.DOC             diff=astextplain
-*.docx            diff=astextplain
-*.DOCX            diff=astextplain
-*.dot             diff=astextplain
-*.DOT             diff=astextplain
-*.pdf             diff=astextplain
-*.PDF             diff=astextplain
-*.rtf             diff=astextplain
-*.RTF             diff=astextplain
-*.mdx             text diff=markdown
-*.tex             text diff=tex
+*.DOC             binary diff=exif
+*.DOCX            binary diff=docx
+*.DOT             binary diff=exif
+*.PDF             binary diff=exif
+*.RTF             binary diff=exif
+*.XLSX            binary diff=exif
 *.adoc            text
-*.textile         text
+*.bibtex          text diff=bibtex
 *.csv             text
-*.tab             text
-*.tsv             text
+*.doc             binary diff=exif
+*.docx            binary diff=docx
+*.dot             binary diff=exif
+*.dotx            binary diff=exif
 *.epub            diff=astextplain
+*.mdx             text diff=markdown
+*.odb             binary diff=exif
+*.odf             binary diff=exif
+*.odg             binary diff=exif
+*.odi             binary diff=exif
+*.odp             binary diff=exif
+*.ods             binary diff=exif
+*.odt             binary diff=odt
+*.otc             binary diff=exif
+*.otg             binary diff=exif
+*.oti             binary diff=exif
+*.otp             binary diff=exif
+*.ots             binary diff=exif
+*.ott             binary diff=exif
+*.pdf             binary diff=exif
+*.ppt             binary diff=exif
+*.pptx            binary diff=exif
+*.ps              binary diff=exif
+*.rtf             binary diff=exif
+*.tab             text
+*.tex             text diff=tex
+*.textile         text
+*.tsv             text
+*.xls             binary diff=exif
+*.xlsx            binary diff=exif
+*.xlt             binary diff=exif
+*.xltm            binary diff=exif
 
 # Scripts
 *.fish            text eol=lf
