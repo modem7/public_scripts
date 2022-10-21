@@ -27,7 +27,7 @@ select opts in "${options[@]}"; do
             ;;
         "Stop")
             echo "Stopping and removing containers, images and volumes."
-            docker compose --project-directory $PROJLOC down --rmi all -v
+            docker compose --project-directory $PROJLOC down
 	        exec $0
             #break
             ;;
