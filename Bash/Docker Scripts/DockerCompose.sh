@@ -44,7 +44,7 @@ select opts in "${options[@]}"; do
         "Logs")
             PS2='Choose an option: '
             # Create a list of files to display
-            container_list=$(docker ps --format '{{.Names}}')
+            container_list=$(docker ps --format '{{.Names}}' | sort)
             echo -e "\nSelect which container you want to see logs for:\n"
             select container_name in ${container_list};
             do
