@@ -4,7 +4,7 @@
 repository:
   #name: NewRepo
   description: Scripts for the general public
-  topics: scripts, public, useful
+  topics: scripts, public, useful, proxmox, docker, bash, batch, powershell
 
   private: false
   has_issues: true
