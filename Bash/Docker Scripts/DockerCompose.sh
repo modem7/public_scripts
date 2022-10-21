@@ -1,7 +1,27 @@
 #!/bin/bash
 
+# Usage
+# Change the PROJLOC variable to your docker-compose project directory.
+#
+# Alternatively, run the script with the -f flag.
+# E.g. ./DockerCompose.sh -f /mnt/other/location
+
 # Variables
 PROJLOC="/mnt/folder/location" # Location of your Docker compose + env file
+
+# Change PROJLOC variable to user input if the -f flag is specified.
+while getopts f: flag
+do
+    case "${flag}" in
+        f) DIR=${OPTARG};;
+    esac
+done
+
+# Apply specified directory if created
+if [ -v DIR ]
+then
+    PROJLOC="$DIR"
+fi
 
 PS1='Choose an option: '
 options=("Pull" "Start" "Stop" "Top" "List Running" "Logs" "Prune" "Quit")
