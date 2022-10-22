@@ -35,7 +35,7 @@ select opts in "${options[@]}"; do
                 docker compose --project-directory $PROJLOC pull
                 exec $0
               else
-               echo "Error: Directory $PROJLOC/ does not exist."
+               echo "Error: Directory $PROJLOC does not exist."
                break
             fi
             ;;
