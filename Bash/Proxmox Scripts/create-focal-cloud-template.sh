@@ -71,17 +71,17 @@ LOCALLANG="en_GB.UTF-8"
 mapfile -d '' NOTES << 'EOF'
 When modifying this template, make sure you run this at the end
 
-apt-get clean \
-&& apt -y autoremove --purge \
-&& apt -y clean \
-&& apt -y autoclean \
-&& cloud-init clean \
-&& echo -n > /etc/machine-id \
-&& echo -n > /var/lib/dbus/machine-id \
-&& sync \
-&& history -c \
-&& history -w \
-&& fstrim -av \
+apt-get clean /\
+&& apt -y autoremove --purge /\
+&& apt -y clean /\
+&& apt -y autoclean /\
+&& cloud-init clean /\
+&& echo -n > /etc/machine-id /\
+&& echo -n > /var/lib/dbus/machine-id /\
+&& sync /\
+&& history -c /\
+&& history -w /\
+&& fstrim -av /\
 && shutdown now
 EOF
 ### End of notes
