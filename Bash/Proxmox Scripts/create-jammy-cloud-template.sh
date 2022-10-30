@@ -35,7 +35,7 @@ wget -N $SRC_URL$SRC_IMG
 cp $SRC_IMG $IMG_NAME
 
 # Image variables
-OSNAME="Ubuntu 20.04"
+OSNAME="Ubuntu 22.04"
 TEMPL_NAME="ubuntu2004-cloud-master"
 VMID_DEFAULT="52000"
 read -p "Enter a VM ID for $OSNAME [$VMID_DEFAULT]: " VMID
