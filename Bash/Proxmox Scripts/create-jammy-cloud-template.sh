@@ -36,7 +36,7 @@ cp $SRC_IMG $IMG_NAME
 
 # Image variables
 OSNAME="Ubuntu 22.04"
-TEMPL_NAME="ubuntu2004-cloud-master"
+TEMPL_NAME="ubuntu2204-cloud-master"
 VMID_DEFAULT="52000"
 read -p "Enter a VM ID for $OSNAME [$VMID_DEFAULT]: " VMID
 VMID=${VMID:-$VMID_DEFAULT}
