@@ -66,6 +66,25 @@ SETX11="yes" # "yes" or "no" required
 X11LAYOUT="gb"
 X11MODEL="pc105"
 LOCALLANG="en_GB.UTF-8"
+## Create VM Notes
+### Start of notes
+mapfile -d '' NOTES << 'EOF'
+When modifying this template, make sure you run this at the end
+
+apt-get clean \
+&& apt -y autoremove --purge \
+&& apt -y clean \
+&& apt -y autoclean \
+&& cloud-init clean \
+&& echo -n > /etc/machine-id \
+&& echo -n > /var/lib/dbus/machine-id \
+&& sync \
+&& history -c \
+&& history -w \
+&& fstrim -av \
+&& shutdown now
+EOF
+### End of notes
 
 # install qemu-guest-agent inside image
 if [ -n "${TZ+set}" ]; then
@@ -95,6 +114,7 @@ qm set $VMID --ciuser $CLOUD_USER
 qm set $VMID --cipassword $CLOUD_PASSWORD
 qm set $VMID --boot c --bootdisk scsi0
 qm set $VMID --ipconfig0 ip=dhcp
+qm set $VMID --description "$NOTES"
 # Apply SSH Key if the value is set
 if [ -n "${SSHKEY+set}" ]; then
   tmpfile=$(mktemp /tmp/sshkey.XXX.pub)
