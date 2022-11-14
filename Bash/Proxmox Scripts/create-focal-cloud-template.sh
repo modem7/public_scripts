@@ -59,9 +59,10 @@ OS_TYPE="l26"
 AGENT_ENABLE="1" #change to 0 if you don't want the guest agent
 FSTRIM="1"
 BIOS="ovmf" # Choose between ovmf or seabios
+MACHINE="q35"
 VIRTPKG="qemu-guest-agent,cloud-utils,cloud-guest-utils"
 TZ="Europe/London"
-SSHKEY="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOFLnUCnFyoONBwVMs1Gj4EqERx+Pc81dyhF6IuF26WM proxvms" #Unset if you don't want to use this.
+SSHKEY="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOFLnUCnFyoONBwVMs1Gj4EqERx+Pc81dyhF6IuF26WM proxvms" #Unset if you don't want to use this. Use the public key.
 SETX11="yes" # "yes" or "no" required
 X11LAYOUT="gb"
 X11MODEL="pc105"
@@ -103,13 +104,14 @@ echo "### Installing Packages ###"
 virt-customize -a $IMG_NAME --install $VIRTPKG
 
 # create VM
-qm create $VMID --name $TEMPL_NAME --memory $MEM --balloon $BALLOON --cores $CORES --bios $BIOS --net0 virtio,bridge=${NET_BRIDGE}${VLAN:+,tag=$VLAN}
+qm create $VMID --name $TEMPL_NAME --memory $MEM --balloon $BALLOON --cores $CORES --bios $BIOS --machine $MACHINE --net0 virtio,bridge=${NET_BRIDGE}${VLAN:+,tag=$VLAN}
 qm set $VMID --agent enabled=$AGENT_ENABLE,fstrim_cloned_disks=$FSTRIM
 qm set $VMID --ostype $OS_TYPE
 qm importdisk $VMID $WORK_DIR/$IMG_NAME $DISK_STOR -format qcow2
 qm set $VMID --scsihw virtio-scsi-pci --scsi0 $DISK_STOR:$VMID/vm-$VMID-disk-0.qcow2,cache=writethrough,discard=on
 qm set $VMID --scsi1 $DISK_STOR:cloudinit
 qm set $VMID --efidisk0 $DISK_STOR:0,efitype=4m,,format=qcow2,pre-enrolled-keys=1,size=528K
+qm set $VMID --rng0 source=/dev/urandom
 qm set $VMID --ciuser $CLOUD_USER
 qm set $VMID --cipassword $CLOUD_PASSWORD
 qm set $VMID --boot c --bootdisk scsi0
