@@ -100,8 +100,18 @@ if [ $SETX11 == 'yes' ]; then
   --firstboot-command "localectl set-x11-keymap $X11LAYOUT $X11MODEL"
 fi
 
-echo "### Installing Packages ###"
-virt-customize -a $IMG_NAME --install $VIRTPKG
+echo "### Updating system and Installing packages ###"
+virt-customize -a $IMG_NAME --update --install $VIRTPKG
+
+echo "### Creating Proxmox Cloud-init config ###"
+echo -n > /tmp/99_pve.cfg
+cat > /tmp/99_pve.cfg <<EOF
+# to update this file, run dpkg-reconfigure cloud-init
+datasource_list: [ NoCloud, ConfigDrive ]
+EOF
+
+echo "### Copying Proxmox Cloud-init config to image ###"
+virt-customize -a $IMG_NAME --upload 99_pve.cfg:/etc/cloud/cloud.cfg.d/
 
 # create VM
 qm create $VMID --name $TEMPL_NAME --memory $MEM --balloon $BALLOON --cores $CORES --bios $BIOS --machine $MACHINE --net0 virtio,bridge=${NET_BRIDGE}${VLAN:+,tag=$VLAN}
@@ -131,6 +141,7 @@ qm resize $VMID scsi0 $DISK_SIZE
 if [ $DELETEIMG == 'yes' ]; then
   rm -v $IMG_NAME
   rm -v $SRC_IMG
+  rm -v /tmp/99_pve.cfg
 else
   echo "Image not deleted"
 fi
