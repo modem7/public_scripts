@@ -31,14 +31,22 @@ DELETEIMG="yes" # Set to no if you don't want the image and qcow files to be del
 cd $WORK_DIR
 wget -N $SRC_URL$SRC_IMG
 
-# Copy downloaded img to qcow2 format
+
+qemu-img resize $SRC_IMG 5G
 cp $SRC_IMG $IMG_NAME
+virt-resize --format=qcow2 --expand /dev/sda1 $SRC_IMG $IMG_NAME
+
+# Rename image to qcow2
+#mv $SRC_IMG $IMG_NAME
+
+# Expand image to be able to fit Desktop packages
+#qemu-img create -f qcow2 $IMG_NAME 5G
+#virt-resize --format=qcow2 --expand /dev/sda1 $SRC_IMG $IMG_NAME
+#virt-customize -a $IMG_NAME --run-command 'grub-install /dev/sda'
 
 # Image variables
 OSNAME="Ubuntu 22.04"
-TEMPL_NAME_DEFAULT="ubuntu2204-cloud-master"
-read -p "Enter a VM Template Name [$TEMPL_NAME_DEFAULT]: " TEMPL_NAME
-TEMPL_NAME=${TEMPL_NAME:-$TEMPL_NAME_DEFAULT}
+TEMPL_NAME="ubuntu2204-cloud-master"
 VMID_DEFAULT="52000"
 read -p "Enter a VM ID for $OSNAME [$VMID_DEFAULT]: " VMID
 VMID=${VMID:-$VMID_DEFAULT}
@@ -49,7 +57,7 @@ GENPASS=$(date +%s | sha256sum | base64 | head -c 16 ; echo)
 CLOUD_PASSWORD_DEFAULT=$GENPASS
 read -p "Enter a Cloud-Init Password for $OSNAME [$CLOUD_PASSWORD_DEFAULT]: " CLOUD_PASSWORD
 CLOUD_PASSWORD=${CLOUD_PASSWORD:-$CLOUD_PASSWORD_DEFAULT}
-MEM="2048"
+MEM="4096"
 BALLOON="768"
 DISK_SIZE="15G"
 DISK_STOR="Proxmox"
@@ -62,7 +70,8 @@ AGENT_ENABLE="1" #change to 0 if you don't want the guest agent
 FSTRIM="1"
 BIOS="ovmf" # Choose between ovmf or seabios
 MACHINE="q35"
-VIRTPKG="qemu-guest-agent,cloud-utils,cloud-guest-utils"
+VIRTPKG="qemu-guest-agent,cloud-utils,cloud-guest-utils,ubuntu-desktop-minimal"
+FIRSTBOOTPKG="ubuntu-desktop-minimal"
 TZ="Europe/London"
 SSHKEY="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOFLnUCnFyoONBwVMs1Gj4EqERx+Pc81dyhF6IuF26WM proxvms" #Unset if you don't want to use this. Use the public key.
 SETX11="yes" # "yes" or "no" required
@@ -103,7 +112,7 @@ if [ $SETX11 == 'yes' ]; then
 fi
 
 echo "### Updating system and Installing packages ###"
-virt-customize -a $IMG_NAME --update --install $VIRTPKG
+virt-customize -a $IMG_NAME --memsize 4096 --update --install $VIRTPKG
 
 echo "### Creating Proxmox Cloud-init config ###"
 echo -n > /tmp/99_pve.cfg
@@ -119,6 +128,7 @@ virt-customize -a $IMG_NAME --upload 99_pve.cfg:/etc/cloud/cloud.cfg.d/
 qm create $VMID --name $TEMPL_NAME --memory $MEM --balloon $BALLOON --cores $CORES --bios $BIOS --machine $MACHINE --net0 virtio,bridge=${NET_BRIDGE}${VLAN:+,tag=$VLAN}
 qm set $VMID --agent enabled=$AGENT_ENABLE,fstrim_cloned_disks=$FSTRIM
 qm set $VMID --ostype $OS_TYPE
+qm set $VMID --vga virtio-gl
 qm importdisk $VMID $WORK_DIR/$IMG_NAME $DISK_STOR -format qcow2
 qm set $VMID --scsihw virtio-scsi-single --scsi0 $DISK_STOR:$VMID/vm-$VMID-disk-0.qcow2,cache=writethrough,discard=on,iothread=1,ssd=1
 qm set $VMID --scsi1 $DISK_STOR:cloudinit
