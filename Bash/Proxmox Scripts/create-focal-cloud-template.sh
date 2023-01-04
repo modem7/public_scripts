@@ -21,15 +21,15 @@ if [ "" = "$PKG_OK" ]; then
 fi
 
 # Image variables
-SRC_URL="https://cloud-images.ubuntu.com/focal/current/"
-SRC_IMG="focal-server-cloudimg-amd64.img"
+SRC_URL="https://cloud-images.ubuntu.com/focal/current/focal-server-cloudimg-amd64.img"
+SRC_IMG=${SRC_URL##*/}
 IMG_NAME="focal-server-cloudimg-amd64.qcow2"
 WORK_DIR="/tmp"
 DELETEIMG="yes" # Set to no if you don't want the image and qcow files to be deleted (useful in Dev)
 
 # Download image
 cd $WORK_DIR
-wget -N $SRC_URL$SRC_IMG
+wget -N $SRC_URL
 
 # Copy downloaded img to qcow2 format
 cp $SRC_IMG $IMG_NAME
