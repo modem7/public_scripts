@@ -2,6 +2,7 @@
 
 CODENAME="$(lsb_release -cs)"
 
+echo 'Apt list location: /etc/apt/sources.list.d/'
 for file in /etc/apt/sources.list.d/*.list; 
    do
       APT_URL="$(cat $file | grep -Eo '(http|https)://[a-zA-Z0-9./?=_-]*' | sort | uniq)"
