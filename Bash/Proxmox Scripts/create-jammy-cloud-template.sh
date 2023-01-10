@@ -21,9 +21,10 @@ if [ "" = "$PKG_OK" ]; then
 fi
 
 # Image variables
-SRC_URL="https://cloud-images.ubuntu.com/jammy/current/jammy-server-cloudimg-amd64.img"
+SRC_VER="jammy"
+SRC_URL="https://cloud-images.ubuntu.com/${SRC_VER}/current/${SRC_VER}-server-cloudimg-amd64.img"
 SRC_IMG=${SRC_URL##*/}
-IMG_NAME="jammy-server-cloudimg-amd64.qcow2"
+IMG_NAME="${SRC_IMG/.img/.qcow2}"
 WORK_DIR="/tmp"
 DELETEIMG="yes" # Set to no if you don't want the image and qcow files to be deleted (useful in Dev)
 
