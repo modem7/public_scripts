@@ -3,6 +3,5 @@
   "extends": ["config:base"],
   "assignees": ["modem7"],
   "labels": ["dependencies"],
-  "includeForks": "true",
   "timezone": ["Europe/London"]
 }
