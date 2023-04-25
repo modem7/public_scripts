@@ -128,6 +128,7 @@ qm set $VMID --rng0 source=/dev/urandom
 qm set $VMID --ciuser $CLOUD_USER
 qm set $VMID --cipassword $CLOUD_PASSWORD
 qm set $VMID --boot c --bootdisk scsi0
+qm set $VMID --tablet 0
 qm set $VMID --ipconfig0 ip=dhcp
 qm set $VMID --description "$NOTES"
 # Apply SSH Key if the value is set
