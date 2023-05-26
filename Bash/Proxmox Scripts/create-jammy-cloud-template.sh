@@ -53,8 +53,9 @@ CLOUD_PASSWORD=${CLOUD_PASSWORD:-$CLOUD_PASSWORD_DEFAULT}
 MEM="2048"
 BALLOON="768"
 DISK_SIZE="15G"
-DISK_STOR="Proxmox"
+DISK_STOR="proxmox"
 NET_BRIDGE="vmbr1"
+ZFS="false" # Set to true if you have a ZFS datastore
 VLAN="50" # Set if you have VLAN requirements
 QUEUES="2"
 CORES="2"
@@ -121,9 +122,17 @@ qm create $VMID --name $TEMPL_NAME --memory $MEM --balloon $BALLOON --cores $COR
 qm set $VMID --agent enabled=$AGENT_ENABLE,fstrim_cloned_disks=$FSTRIM
 qm set $VMID --ostype $OS_TYPE
 qm importdisk $VMID $WORK_DIR/$IMG_NAME $DISK_STOR -format qcow2
-qm set $VMID --scsihw virtio-scsi-single --scsi0 $DISK_STOR:$VMID/vm-$VMID-disk-0.qcow2,cache=writethrough,discard=on,iothread=1,ssd=1
+if [ $ZFS == 'true' ]; then
+  qm set $VMID --scsihw virtio-scsi-single --scsi0 $DISK_STOR:vm-$VMID-disk-0,cache=writethrough,discard=on,iothread=1,ssd=1
+else
+  qm set $VMID --scsihw virtio-scsi-single --scsi0 $DISK_STOR:$VMID/vm-$VMID-disk-0.qcow2,cache=writethrough,discard=on,iothread=1,ssd=1
+fi
 qm set $VMID --scsi1 $DISK_STOR:cloudinit
-qm set $VMID --efidisk0 $DISK_STOR:0,efitype=4m,,format=qcow2,pre-enrolled-keys=1,size=528K
+if [ $ZFS == 'true' ]; then
+  qm set $VMID --efidisk0 $DISK_STOR:0,efitype=4m,,pre-enrolled-keys=1,size=528K
+else
+  qm set $VMID --efidisk0 $DISK_STOR:0,efitype=4m,,format=qcow2,pre-enrolled-keys=1,size=528K
+fi
 qm set $VMID --rng0 source=/dev/urandom
 qm set $VMID --ciuser $CLOUD_USER
 qm set $VMID --cipassword $CLOUD_PASSWORD
