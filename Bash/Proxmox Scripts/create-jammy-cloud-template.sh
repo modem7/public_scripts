@@ -11,6 +11,7 @@
 # Prerequesites:
 # Install "apt-get install libguestfs-tools".
 
+# Script Variables
 # Check if libguestfs-tools is installed - exit if it isn't.
 REQUIRED_PKG="libguestfs-tools"
 PKG_OK=$(dpkg-query -W --showformat='${Status}\n' $REQUIRED_PKG|grep "install ok installed")
@@ -20,6 +21,7 @@ if [ "" = "$PKG_OK" ]; then
   exit
 fi
 
+#######################################################################################################
 # Image variables
 SRC_VER="jammy"
 SRC_URL="https://cloud-images.ubuntu.com/${SRC_VER}/current/${SRC_VER}-server-cloudimg-amd64.img"
@@ -27,13 +29,6 @@ SRC_IMG=${SRC_URL##*/}
 IMG_NAME="${SRC_IMG/.img/.qcow2}"
 WORK_DIR="/tmp"
 DELETEIMG="yes" # Set to no if you don't want the image and qcow files to be deleted (useful in Dev)
-
-# Download image
-cd $WORK_DIR
-wget -N $SRC_URL
-
-# Copy downloaded img to qcow2 format
-cp $SRC_IMG $IMG_NAME
 
 # Image variables
 OSNAME="Ubuntu 22.04"
@@ -93,6 +88,13 @@ apt-get clean \
 EOF
 ### End of notes
 
+# Download image
+cd $WORK_DIR
+wget -N $SRC_URL
+
+# Copy downloaded img to qcow2 format
+cp $SRC_IMG $IMG_NAME
+
 # install qemu-guest-agent inside image
 if [ -n "${TZ+set}" ]; then
   echo "### Setting up TZ ###"
@@ -140,6 +142,7 @@ qm set $VMID --boot c --bootdisk scsi0
 qm set $VMID --tablet 0
 qm set $VMID --ipconfig0 ip=dhcp
 qm set $VMID --description "$NOTES"
+
 # Apply SSH Key if the value is set
 if [ -n "${SSHKEY+set}" ]; then
   tmpfile=$(mktemp /tmp/sshkey.XXX.pub)
@@ -149,12 +152,15 @@ if [ -n "${SSHKEY+set}" ]; then
 fi
 qm resize $VMID scsi0 $DISK_SIZE
 
+# Deleting temporary files
+echo "Deleting temporary files"
+rm -v /tmp/99_pve.cfg
+rm -v $IMG_NAME
+
 # Delete original image file
 #rm -v $WORK_DIR/$IMG_NAME
 if [ $DELETEIMG == 'yes' ]; then
-  rm -v $IMG_NAME
   rm -v $SRC_IMG
-  rm -v /tmp/99_pve.cfg
 else
   echo "Image not deleted"
 fi
