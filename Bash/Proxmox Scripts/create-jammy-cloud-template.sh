@@ -76,18 +76,20 @@ LOCALLANG="en_GB.UTF-8"
 mapfile -d '' NOTES << 'EOF'
 When modifying this template, make sure you run this at the end
 
-apt-get clean /\
-&& apt -y autoremove --purge /\
-&& apt -y clean /\
-&& apt -y autoclean /\
-&& cloud-init clean /\
-&& echo -n > /etc/machine-id /\
-&& echo -n > /var/lib/dbus/machine-id /\
-&& sync /\
-&& history -c /\
-&& history -w /\
-&& fstrim -av /\
+```
+apt-get clean \
+&& apt -y autoremove --purge \
+&& apt -y clean \
+&& apt -y autoclean \
+&& cloud-init clean \
+&& echo -n > /etc/machine-id \
+&& echo -n > /var/lib/dbus/machine-id \
+&& sync \
+&& history -c \
+&& history -w \
+&& fstrim -av \
 && shutdown now
+```
 EOF
 ### End of notes
 
@@ -121,18 +123,16 @@ virt-customize -a $IMG_NAME --upload 99_pve.cfg:/etc/cloud/cloud.cfg.d/
 qm create $VMID --name $TEMPL_NAME --memory $MEM --balloon $BALLOON --cores $CORES --bios $BIOS --machine $MACHINE --net0 virtio,bridge=${NET_BRIDGE}${VLAN:+,tag=$VLAN}
 qm set $VMID --agent enabled=$AGENT_ENABLE,fstrim_cloned_disks=$FSTRIM
 qm set $VMID --ostype $OS_TYPE
-qm importdisk $VMID $WORK_DIR/$IMG_NAME $DISK_STOR -format qcow2
 if [ $ZFS == 'true' ]; then
+  qm importdisk $VMID $WORK_DIR/$IMG_NAME $DISK_STOR
   qm set $VMID --scsihw virtio-scsi-single --scsi0 $DISK_STOR:vm-$VMID-disk-0,cache=writethrough,discard=on,iothread=1,ssd=1
-else
-  qm set $VMID --scsihw virtio-scsi-single --scsi0 $DISK_STOR:$VMID/vm-$VMID-disk-0.qcow2,cache=writethrough,discard=on,iothread=1,ssd=1
-fi
-qm set $VMID --scsi1 $DISK_STOR:cloudinit
-if [ $ZFS == 'true' ]; then
   qm set $VMID --efidisk0 $DISK_STOR:0,efitype=4m,,pre-enrolled-keys=1,size=528K
 else
+  qm importdisk $VMID $WORK_DIR/$IMG_NAME $DISK_STOR -format qcow2
+  qm set $VMID --scsihw virtio-scsi-single --scsi0 $DISK_STOR:$VMID/vm-$VMID-disk-0.qcow2,cache=writethrough,discard=on,iothread=1,ssd=1
   qm set $VMID --efidisk0 $DISK_STOR:0,efitype=4m,,format=qcow2,pre-enrolled-keys=1,size=528K
 fi
+qm set $VMID --scsi1 $DISK_STOR:cloudinit
 qm set $VMID --rng0 source=/dev/urandom
 qm set $VMID --ciuser $CLOUD_USER
 qm set $VMID --cipassword $CLOUD_PASSWORD
