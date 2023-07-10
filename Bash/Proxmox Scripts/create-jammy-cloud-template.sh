@@ -30,6 +30,17 @@ IMG_NAME="${SRC_IMG/.img/.qcow2}"
 WORK_DIR="/tmp"
 DELETEIMG="yes" # Set to no if you don't want the image and qcow files to be deleted (useful in Dev)
 
+# CTRL+C catch
+ctrl_c () {
+    echo "User pressed Ctrl + C. Exiting script..."
+    echo "Deleting temporary files"
+    [ -f "/tmp/99_pve.cfg" ] && rm -v /tmp/99_pve.cfg
+    [ -f "$IMG_NAME" ] && rm -v $IMG_NAME
+    [ -f "$SRC_IMG" ] && rm -v $SRC_IMG
+
+    exit 1
+}
+
 # Image variables
 OSNAME="Ubuntu 22.04"
 TEMPL_NAME_DEFAULT="ubuntu2204-cloud-master"
@@ -50,7 +61,7 @@ BALLOON="768"
 DISK_SIZE="15G"
 DISK_STOR="proxmox"
 NET_BRIDGE="vmbr1"
-ZFS="false" # Set to true if you have a ZFS datastore
+ZFS="true" # Set to true if you have a ZFS datastore
 VLAN="50" # Set if you have VLAN requirements
 QUEUES="2"
 CORES="2"
@@ -87,6 +98,9 @@ apt-get clean \
 ```
 EOF
 ### End of notes
+
+# Trap CTRL+C
+trap ctrl_c INT
 
 # Download image
 cd $WORK_DIR
@@ -141,6 +155,7 @@ qm set $VMID --cipassword $CLOUD_PASSWORD
 qm set $VMID --boot c --bootdisk scsi0
 qm set $VMID --tablet 0
 qm set $VMID --ipconfig0 ip=dhcp
+qm cloudinit update $VMID
 qm set $VMID --description "$NOTES"
 
 # Apply SSH Key if the value is set
