@@ -2,7 +2,7 @@
 # Destroy current templates
 for VM in 600{0..2}
 do
-qm destroy $VM --destroy-unreferenced-disks 1 --purge &
+qm destroy $VM --destroy-unreferenced-disks 1 &
 done
 wait
 
