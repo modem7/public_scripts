@@ -1,26 +1,31 @@
+# Destroy current templates
 for VM in 600{0..2}
 do
 qm destroy $VM --destroy-unreferenced-disks 1 --purge &
 done
 wait
 
+# Clone from master VM's
 qm clone 9001 6000 --name ubuntu-desktop-cloud-master-template & \
 qm clone 9002 6001 --name ubuntu2204-cloud-master-template & \
 qm clone 9003 6002 --name ubuntu2204-cloud-master-extras-template & \
 wait
 
+# Set Cloud-Init to DHCP
 for VM in 600{0..2}
 do
 qm set $VM --ipconfig0 ip=dhcp &
 done
 wait
 
+# Start VM's
 for VM in 600{0..2}
 do
 qm start $VM &
 done
 wait
 
+# Run cleanup on templates
 for VM in 600{0..2}
 do
 qm guest exec $VM -- /bin/bash -c "apt-get clean"
@@ -36,12 +41,14 @@ qm guest exec $VM -- /bin/bash -c "history -w"
 qm guest exec $VM -- /bin/bash -c "fstrim -av"
 done
 
+# Shutdown templates
 for VM in 600{0..2}
 do
 qm shutdown $VM &
 done
 wait
 
+# Convert to template
 for VM in 600{0..2}
 do
 qm set $VM --template 1 &
