@@ -15,11 +15,14 @@ CLOUD_PASSWORD_DEFAULT=$GEN_PASS # Password for cloud-init
 CLOUD_USER_DEFAULT="root" # User for cloud-init
 LOCAL_LANG="en_GB.UTF-8"
 SET_X11="yes" # "yes" or "no" required
-VIRT_PKGS="qemu-guest-agent,cloud-utils,cloud-guest-utils"
 VMID_DEFAULT="52000" # VM ID
 X11_LAYOUT="gb"
 X11_MODEL="pc105"
 
+### Virt-Customize variables
+VIRT_PKGS="qemu-guest-agent,cloud-utils,cloud-guest-utils"
+EXTRA_VIRT_PKGS="" # Comma separated packages. Leave empty if not installing additional packages.
+ 
 ### VM variables
 AGENT_ENABLE="1" # Change to 0 if you don't want the guest agent
 BALLOON="768" # Minimum balooning size
@@ -250,7 +253,7 @@ download_image() {
 }
 
 # Install qemu-guest-agent inside image
-install_qemu_guest_agent() {
+install_virt_pkgs() {
     if [ -n "${TZ+set}" ]; then
         echo "### Setting up TZ ###"
         virt-customize -a $DISK_IMAGE --timezone $TZ
@@ -265,6 +268,13 @@ install_qemu_guest_agent() {
 
     echo "### Updating system and installing packages ###"
     virt-customize -a $DISK_IMAGE --update --install $VIRT_PKGS
+
+    if [ -z "$EXTRA_VIRT_PKGS" ]
+    then
+          echo "No additional packages to install"
+    else
+          virt-customize -a $DISK_IMAGE --update --install $EXTRA_VIRT_PKGS
+    fi
 }
 
 # Create Proxmox Cloud-init config
@@ -352,7 +362,7 @@ create_work_dir
 download_image
 
 # Install qemu-guest-agent, set timezone and keyboard
-install_qemu_guest_agent
+install_virt_pkgs
 
 # Create Proxmox Cloud-init config
 create_proxmox_cloud_init_config
