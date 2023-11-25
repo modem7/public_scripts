@@ -22,7 +22,7 @@ X11_MODEL="pc105"
 ### Virt-Customize variables
 VIRT_PKGS="qemu-guest-agent,cloud-utils,cloud-guest-utils"
 EXTRA_VIRT_PKGS="" # Comma separated packages. Leave empty if not installing additional packages.
- 
+
 ### VM variables
 AGENT_ENABLE="1" # Change to 0 if you don't want the guest agent
 BALLOON="768" # Minimum balooning size
@@ -139,7 +139,7 @@ select_ubuntu_version() {
     camel_to_lower["Noble"]="noble"
 
     echo "Choose an Ubuntu version:"
-    
+
     select version in "${!camel_to_lower[@]}"; do
         if [ -n "$version" ]; then
             selected_version="${camel_to_lower["$version"]}"
@@ -311,6 +311,7 @@ create_vm() {
         qm set $VMID --scsihw virtio-scsi-single --scsi0 $DISK_STOR:$VMID/vm-$VMID-disk-0.qcow2,cache=writethrough,discard=on,iothread=1,ssd=1
         qm set "$VM"
     fi
+    qm set $VMID --tags $TAG
     qm set $VMID --scsi1 $DISK_STOR:cloudinit
     qm set $VMID --rng0 source=/dev/urandom
     qm set $VMID --ciuser $CLOUD_USER
@@ -320,7 +321,6 @@ create_vm() {
     qm set $VMID --ipconfig0 ip=dhcp
     qm cloudinit update $VMID
     qm set $VMID --description "$NOTES"
-    qm set $VMID --tags $TAG
 }
 
 # Apply SSH Key if the value is set
