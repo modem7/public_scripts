@@ -34,6 +34,7 @@ FSTRIM="1"
 MACHINE="q35" # Type of machine. Q35 or i440fx
 MEM="2048" # Max RAM
 NET_BRIDGE="vmbr1" # Network bridge name
+TAG="template"
 
 OS_TYPE="l26" # OS type (Linux 6x - 2.6 Kernel)
 # SSH Keys. Unset the variable if you don't want to use this. Use the public key. One per line.
@@ -319,6 +320,7 @@ create_vm() {
     qm set $VMID --ipconfig0 ip=dhcp
     qm cloudinit update $VMID
     qm set $VMID --description "$NOTES"
+    qm set $VMID --tags $TAG
 }
 
 # Apply SSH Key if the value is set
