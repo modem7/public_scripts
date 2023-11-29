@@ -1,8 +1,6 @@
 #!/bin/bash
 # Version	      0.2.3
 # Date		      04.18.2022
-# Author 	      DerDanilo 
-# Contributors        aboutte, xmirakulix, bootsie123, phidauex
 
 ###########################
 # Configuration Variables #
