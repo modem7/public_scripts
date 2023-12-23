@@ -80,3 +80,12 @@ ffmpeg \
     -c:a aac \
     -b:a "$T_ARATE"k \
     "$T_FILE"
+
+# Remove temporary files
+if [ -f "ffmpeg2pass-0.log" ] ; then
+    rm "ffmpeg2pass-0.log"
+fi
+
+if [ -f "ffmpeg2pass-0.log.mbtree" ] ; then
+    rm "ffmpeg2pass-0.log.mbtree"
+fi
