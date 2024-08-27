@@ -304,12 +304,12 @@ create_vm() {
         echo "### ZFS set to $ZFS ###"
         qm importdisk $VMID $WORK_DIR/$DISK_IMAGE $DISK_STOR
         qm set $VMID --scsihw virtio-scsi-single --scsi0 $DISK_STOR:vm-$VMID-disk-0,cache=writethrough,discard=on,iothread=1,ssd=1
-        qm set $VMID --efidisk0 $DISK_STOR:0,efitype=4m,,pre-enrolled-keys=1,size=528K
+        qm set $VMID --efidisk0 $DISK_STOR:0,efitype=4m,,pre-enrolled-keys=1,size=1M
     else
         echo "### ZFS set to $ZFS ####"
         qm importdisk $VMID $WORK_DIR/$DISK_IMAGE $DISK_STOR -format qcow2
         qm set $VMID --scsihw virtio-scsi-single --scsi0 $DISK_STOR:$VMID/vm-$VMID-disk-0.qcow2,cache=writethrough,discard=on,iothread=1,ssd=1
-        qm set $VMID --efidisk0 $DISK_STOR:0,efitype=4m,,format=qcow2,pre-enrolled-keys=1,size=528K
+        qm set $VMID --efidisk0 $DISK_STOR:0,efitype=4m,,format=qcow2,pre-enrolled-keys=1,size=1M
     fi
     qm set $VMID --tags $TAG
     qm set $VMID --scsi1 $DISK_STOR:cloudinit
