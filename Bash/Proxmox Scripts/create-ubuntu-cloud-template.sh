@@ -38,10 +38,7 @@ TAG="template"
 
 OS_TYPE="l26" # OS type (Linux 6x - 2.6 Kernel)
 # SSH Keys. Unset the variable if you don't want to use this. Use the public key. One per line.
-SSH_KEY=$(cat << 'EOF'
-ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOFLnUCnFyoONBwVMs1Gj4EqERx+Pc81dyhF6IuF26WM proxvms
-EOF
-)
+SSH_KEY="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOFLnUCnFyoONBwVMs1Gj4EqERx+Pc81dyhF6IuF26WM proxvms"
 TZ="Europe/London"
 VLAN="50" # Set if you have VLAN requirements
 ZFS="true" # Set to true if you have a ZFS datastore
@@ -327,7 +324,7 @@ create_vm() {
 apply_ssh() {
 echo "### Applying SSH Key ###"
 if [ -n "${SSH_KEY+set}" ]; then
-    qm set $VMID --sshkey <(cat <<<"${SSH_KEY}")
+    qm set $VMID --sshkey <(echo "${SSH_KEY}")
 fi
 }
 
