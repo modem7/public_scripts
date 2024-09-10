@@ -37,7 +37,7 @@ NET_BRIDGE="vmbr1" # Network bridge name
 TAG="template"
 
 OS_TYPE="l26" # OS type (Linux 6x - 2.6 Kernel)
-# SSH Keys. Unset the variable if you don't want to use this. Use the public key. One per line.
+# SSH Keys. Unset the variable if you don't want to use this. Use the public key. 
 SSH_KEY="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOFLnUCnFyoONBwVMs1Gj4EqERx+Pc81dyhF6IuF26WM proxvms"
 TZ="Europe/London"
 VLAN="50" # Set if you have VLAN requirements
@@ -131,8 +131,6 @@ select_ubuntu_version() {
 
     camel_to_lower["Jammy"]="jammy"
     camel_to_lower["Focal"]="focal"
-    camel_to_lower["Mantic"]="mantic"
-    camel_to_lower["Lunar"]="lunar"
     camel_to_lower["Noble"]="noble"
 
     echo "Choose an Ubuntu version:"
@@ -159,10 +157,6 @@ select_ubuntu_version() {
         return
     fi
 }
-
-# DISK_IMAGE="jammy-server-cloudimg-amd64.img"
-# IMAGE_URL="https://cloud-images.ubuntu.com/jammy/current/$DISK_IMAGE"
-
 
 # Check if VM ID exists
 vmidexist() {
