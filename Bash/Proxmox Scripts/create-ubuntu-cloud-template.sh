@@ -130,8 +130,8 @@ select_ubuntu_version() {
     declare -A camel_to_lower
 
     camel_to_lower["Jammy"]="jammy"
-    camel_to_lower["Focal"]="focal"
     camel_to_lower["Noble"]="noble"
+    camel_to_lower["Plucky"]="plucky"
 
     echo "Choose an Ubuntu version:"
 
