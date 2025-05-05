@@ -29,19 +29,19 @@ BALLOON="768" # Minimum balooning size
 BIOS="ovmf" # Choose between ovmf or seabios
 CORES="2"
 DISK_SIZE="15G"
-DISK_STOR="local-lvm" # Name of disk storage within Proxmox
+DISK_STOR="proxmox" # Name of disk storage within Proxmox
 FSTRIM="1"
 MACHINE="q35" # Type of machine. Q35 or i440fx
 MEM="2048" # Max RAM
-NET_BRIDGE="vmbr0" # Network bridge name
+NET_BRIDGE="vmbr1" # Network bridge name
 TAG="template"
 
 OS_TYPE="l26" # OS type (Linux 6x - 2.6 Kernel)
 # SSH Keys. Unset the variable if you don't want to use this. Use the public key. 
 SSH_KEY="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOFLnUCnFyoONBwVMs1Gj4EqERx+Pc81dyhF6IuF26WM proxvms"
 TZ="Europe/London"
-VLAN="" # Set if you have VLAN requirements
-ZFS="false" # Set to true if you have a ZFS datastore
+VLAN="50" # Set if you have VLAN requirements
+ZFS="true" # Set to true if you have a ZFS datastore
 
 # Notes variable
 NOTES=$(cat << 'EOF'
