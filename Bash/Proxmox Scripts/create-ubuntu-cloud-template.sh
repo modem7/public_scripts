@@ -6,11 +6,24 @@
 # Supports ZFS (raw), LVM-thin (raw), and directory (qcow2) storage backends.
 #
 # Usage:
-#   ./create-ubuntu-cloud-template.sh [--config <profile>.conf]
+#   ./create-ubuntu-cloud-template.sh [OPTIONS]
 #
-# On first run, answer the prompts. At the end you will be offered the chance
-# to save your answers as a named profile (e.g. noble-webserver.conf) which
-# can be reused with --config on subsequent runs.
+# Run with --help to see all available options and examples.
+#
+# Quick start:
+#   First run  — answer the prompts; save a named profile at the end.
+#   Repeat run — ./create-ubuntu-cloud-template.sh --config <profile>.conf
+#   Automated  — ./create-ubuntu-cloud-template.sh --config <profile>.conf \
+#                  --unattended --vmid <id> [--template] [--force-overwrite \
+#                  --i-know-what-i-am-doing]
+#
+# VM ID selection:
+#   --auto-vmid alone        — finds the next free ID from 100 upwards.
+#   --vmid <id> --auto-vmid  — tries <id> first; if taken, increments from
+#                              there. Use this to control which range your
+#                              templates live in (e.g. --vmid 52000 --auto-vmid
+#                              keeps templates in the 52000+ range).
+#   --vmid <id> alone        — uses exactly <id>; fails if already taken.
 # =============================================================================
 
 set -euo pipefail
@@ -78,7 +91,10 @@ SSH_KEY=""
 TAG="template"
 
 # Required host packages
-REQUIRED_PKGS=("libguestfs-tools" "wget")
+# - libguestfs-tools: provides virt-customize for image modification
+# - wget:             image/checksum downloads and GitHub key fetching
+# - python3:          used to set VM description without shell newline mangling
+REQUIRED_PKGS=("libguestfs-tools" "wget" "python3")
 
 # =============================================================================
 # Colour helpers
@@ -101,17 +117,24 @@ header()  { echo -e "\n${BOLD}=== $* ===${RESET}"; }
 # Argument parsing
 # =============================================================================
 CONFIG_FILE=""
-CONVERT_TO_TEMPLATE=""   # "yes" | "no" | "" (prompt interactively)
 UNATTENDED="no"          # "yes" = skip all prompts when --config is loaded
 VMID_FLAG=""             # set via --vmid to bypass the VMID prompt entirely
 AUTO_VMID="no"           # "yes" = auto-increment VMID on conflict instead of dying
 FORCE_OVERWRITE="no"     # "yes" = destroy existing template VM and replace it
 I_KNOW="no"              # "yes" = skip overwrite countdown in unattended mode
 
+# CLI flags that must survive config sourcing — stored separately and applied after
+_CLI_CONVERT_TO_TEMPLATE=""
+_CLI_TEMPL_NAME=""
+
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --config)
             CONFIG_FILE="$2"
+            shift 2
+            ;;
+        --name)
+            _CLI_TEMPL_NAME="$2"
             shift 2
             ;;
         --vmid)
@@ -135,11 +158,11 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         --template)
-            CONVERT_TO_TEMPLATE="yes"
+            _CLI_CONVERT_TO_TEMPLATE="yes"
             shift
             ;;
         --no-template)
-            CONVERT_TO_TEMPLATE="no"
+            _CLI_CONVERT_TO_TEMPLATE="no"
             shift
             ;;
         --help|-h)
@@ -148,9 +171,18 @@ while [[ $# -gt 0 ]]; do
             echo "Options:"
             echo "  --config <file>              Load a previously saved profile config file."
             echo "                               Paths are relative to the script directory unless absolute."
+            echo "  --name <name>                Set the VM template name directly, skipping the prompt."
             echo "  --vmid <id>                  Set the VM ID directly, skipping the prompt."
-            echo "  --auto-vmid                  If the chosen VM ID is taken, automatically increment"
-            echo "                               to the next free ID instead of stopping."
+            echo "                               Fails if the ID is already taken (use --auto-vmid"
+            echo "                               to increment automatically instead)."
+            echo "  --auto-vmid                  Automatically find the next free VM ID."
+            echo "                               Without --vmid: starts from 100 upwards."
+            echo "                               With --vmid <id>: tries <id> first, then"
+            echo "                               increments from there if taken."
+            echo "                               Recommended: always pair with --vmid to control"
+            echo "                               which ID range your templates live in."
+            echo "                               e.g. --vmid 52000 --auto-vmid keeps templates"
+            echo "                               in the 52000+ range rather than starting at 100."
             echo "  --unattended                 Skip all interactive prompts. Requires --config."
             echo "                               Password is auto-generated and shown at the end."
             echo "                               Snippet search is skipped unless SNIPPETS_STOR is"
@@ -170,11 +202,15 @@ while [[ $# -gt 0 ]]; do
             echo "Examples:"
             echo "  ./$SCRIPT_NAME"
             echo "  ./$SCRIPT_NAME --config noble-webserver.conf"
+            echo "  ./$SCRIPT_NAME --config noble-webserver.conf --name ubuntu-noble-webserver"
             echo "  ./$SCRIPT_NAME --config noble-webserver.conf --vmid 52001"
-            echo "  ./$SCRIPT_NAME --config noble-webserver.conf --vmid 52001 --auto-vmid"
+            echo "  ./$SCRIPT_NAME --config noble-webserver.conf --auto-vmid"
+            echo "    (next free ID from 100)"
+            echo "  ./$SCRIPT_NAME --config noble-webserver.conf --vmid 52000 --auto-vmid"
+            echo "    (next free ID from 52000 — keeps templates in your chosen range)"
             echo "  ./$SCRIPT_NAME --config noble-webserver.conf --vmid 52001 --force-overwrite"
-            echo "  ./$SCRIPT_NAME --config noble-webserver.conf --unattended --vmid 52001 --template"
-            echo "  ./$SCRIPT_NAME --config noble-webserver.conf --unattended --vmid 52001 --force-overwrite --i-know-what-i-am-doing --template"
+            echo "  ./$SCRIPT_NAME --config noble-webserver.conf --unattended --vmid 52000 --auto-vmid --template"
+            echo "  ./$SCRIPT_NAME --config noble-webserver.conf --unattended --vmid 52001 --name ubuntu-noble-webserver --force-overwrite --i-know-what-i-am-doing --template"
             exit 0
             ;;
         *)
@@ -213,21 +249,46 @@ if [[ "$AUTO_VMID" == "yes" && "$FORCE_OVERWRITE" == "yes" ]]; then
     die "--auto-vmid and --force-overwrite are mutually exclusive. Choose one conflict resolution strategy."
 fi
 
-# --vmid flag overrides anything from the config
-if [[ -n "$VMID_FLAG" ]]; then
-    VMID="$VMID_FLAG"
-fi
+# Apply CLI flag overrides — these must win over anything in the config file
+CONVERT_TO_TEMPLATE="${_CLI_CONVERT_TO_TEMPLATE:-${CONVERT_TO_TEMPLATE:-}}"
+[[ -n "$_CLI_TEMPL_NAME" ]] && TEMPL_NAME="$_CLI_TEMPL_NAME"
+[[ -n "$VMID_FLAG"       ]] && VMID="$VMID_FLAG"
 
 # =============================================================================
-# Trap CTRL+C
+# Traps — CTRL+C and unexpected errors
 # =============================================================================
+# VMID_CREATED tracks whether qm create has run so the error handler knows
+# whether there is a VM to clean up.
+VMID_CREATED=""
+
+error_handler() {
+    local exit_code=$?
+    local line=$1
+    echo ""
+    error "Script failed at line $line (exit code $exit_code)."
+    _destroy_partial_vm
+    cleanup
+    exit "$exit_code"
+}
+
 ctrl_c() {
     echo ""
-    warn "Interrupted by user. Running cleanup..."
+    warn "Interrupted by user."
+    _destroy_partial_vm
     cleanup
     exit 1
 }
+
+_destroy_partial_vm() {
+    if [[ -n "${VMID_CREATED:-}" ]] && qm list | awk 'NR>1 {print $1}' | grep -q "^${VMID_CREATED}$"; then
+        warn "Destroying partially configured VM ${VMID_CREATED}..."
+        qm destroy "$VMID_CREATED" --destroy-unreferenced-disks 1 --purge 1 2>/dev/null || true
+        warn "VM ${VMID_CREATED} destroyed."
+    fi
+}
+
 trap ctrl_c INT
+trap 'error_handler $LINENO' ERR
 
 # =============================================================================
 # Preflight: must be on a Proxmox host
@@ -258,15 +319,16 @@ install_packages() {
     fi
 
     warn "Missing packages: ${missing[*]}"
-    read -rp "Install them now? (Y/n): " choice
-    choice="${choice:-Y}"
-    if [[ "$choice" =~ ^[Yy]$ ]]; then
-        apt-get update -qq
-        apt-get install -y "${missing[@]}"
-        success "Packages installed: ${missing[*]}"
+    if [[ "$UNATTENDED" == "yes" ]]; then
+        info "Unattended mode — installing automatically."
     else
-        die "Required packages not installed. Aborting."
+        read -rp "Install them now? (Y/n): " choice
+        choice="${choice:-Y}"
+        [[ ! "$choice" =~ ^[Yy]$ ]] && die "Required packages not installed. Aborting."
     fi
+    apt-get update -qq
+    apt-get install -y "${missing[@]}"
+    success "Packages installed: ${missing[*]}"
 }
 
 # =============================================================================
@@ -343,6 +405,19 @@ _set_distro_vars() {
     success "Selected: $OS_NAME"
 }
 
+# Maps a pvesm storage type string to STORAGE_FORMAT and STORAGE_BACKEND globals
+_resolve_storage_type() {
+    local stor_type="$1"
+    case "$stor_type" in
+        zfspool)          STORAGE_FORMAT="raw";   STORAGE_BACKEND="zfs" ;;
+        lvmthin|lvm)      STORAGE_FORMAT="raw";   STORAGE_BACKEND="lvm" ;;
+        dir|nfs|cifs|btrfs) STORAGE_FORMAT="qcow2"; STORAGE_BACKEND="dir" ;;
+        *)
+            warn "Unknown storage type '$stor_type'. Defaulting to qcow2."
+            STORAGE_FORMAT="qcow2"; STORAGE_BACKEND="dir" ;;
+    esac
+}
+
 # =============================================================================
 # Storage: list available Proxmox storages, let user pick, auto-detect type
 # =============================================================================
@@ -353,24 +428,13 @@ select_storage() {
 
     if [[ -n "${DISK_STOR:-}" ]]; then
         info "Using storage from config: $DISK_STOR"
-        # Auto-detect the backend type from pvesm for the pre-configured storage
         local stored_type
         stored_type=$(pvesm status | awk -v s="$DISK_STOR" '$1==s {print $2}')
         if [[ -z "$stored_type" ]]; then
             warn "Configured storage '$DISK_STOR' not found or inactive — falling back to selection."
             DISK_STOR=""
         else
-            case "$stored_type" in
-                zfspool)
-                    STORAGE_FORMAT="raw"; STORAGE_BACKEND="zfs" ;;
-                lvmthin|lvm)
-                    STORAGE_FORMAT="raw"; STORAGE_BACKEND="lvm" ;;
-                dir|nfs|cifs|btrfs)
-                    STORAGE_FORMAT="qcow2"; STORAGE_BACKEND="dir" ;;
-                *)
-                    warn "Unknown storage type '$stored_type'. Defaulting to qcow2."
-                    STORAGE_FORMAT="qcow2"; STORAGE_BACKEND="dir" ;;
-            esac
+            _resolve_storage_type "$stored_type"
             success "Template will be stored on: $DISK_STOR ($stored_type / $STORAGE_FORMAT)"
             return
         fi
@@ -379,23 +443,18 @@ select_storage() {
     info "Scanning active Proxmox storage pools..."
     echo ""
 
-    # Parse pvesm status: columns are Name, Type, Status, Total, Used, Available, %
-    local storages=()
-    local types=()
+    local storages=() types=()
     while IFS= read -r line; do
         local name type status
         name=$(awk '{print $1}' <<< "$line")
         type=$(awk '{print $2}' <<< "$line")
         status=$(awk '{print $3}' <<< "$line")
-        [[ "$name" == "Name" ]] && continue          # header row
-        [[ "$status" != "active" ]] && continue      # skip inactive
+        [[ "$name" == "Name" || "$status" != "active" ]] && continue
         storages+=("$name")
         types+=("$type")
     done < <(pvesm status)
 
-    if [[ ${#storages[@]} -eq 0 ]]; then
-        die "No active storage pools found."
-    fi
+    [[ ${#storages[@]} -eq 0 ]] && die "No active storage pools found."
 
     local i=1
     for idx in "${!storages[@]}"; do
@@ -404,7 +463,6 @@ select_storage() {
     done
     echo ""
 
-    # Find default index if DISK_STOR_DEFAULT exists in list
     local default_num=1
     for idx in "${!storages[@]}"; do
         if [[ "${storages[$idx]}" == "$DISK_STOR_DEFAULT" ]]; then
@@ -413,8 +471,7 @@ select_storage() {
         fi
     done
 
-    local selected_stor=""
-    local selected_type=""
+    local selected_stor="" selected_type=""
     while [[ -z "$selected_stor" ]]; do
         read -rp "Select storage pool [${default_num}]: " choice
         choice="${choice:-$default_num}"
@@ -427,28 +484,7 @@ select_storage() {
     done
 
     DISK_STOR="$selected_stor"
-
-    # Map pvesm type to importdisk format
-    case "$selected_type" in
-        zfspool)
-            STORAGE_FORMAT="raw"
-            STORAGE_BACKEND="zfs"
-            ;;
-        lvmthin|lvm)
-            STORAGE_FORMAT="raw"
-            STORAGE_BACKEND="lvm"
-            ;;
-        dir|nfs|cifs|btrfs)
-            STORAGE_FORMAT="qcow2"
-            STORAGE_BACKEND="dir"
-            ;;
-        *)
-            warn "Unknown storage type '$selected_type'. Defaulting to qcow2."
-            STORAGE_FORMAT="qcow2"
-            STORAGE_BACKEND="dir"
-            ;;
-    esac
-
+    _resolve_storage_type "$selected_type"
     success "Template will be stored on: $DISK_STOR ($selected_type / $STORAGE_FORMAT)"
 }
 
@@ -532,7 +568,14 @@ destroy_existing_template() {
 }
 
 get_valid_vmid() {
-    # --vmid flag or config VMID takes priority; set VMID if not already set
+    # --auto-vmid with no explicit --vmid: always find next free from 100
+    if [[ "$AUTO_VMID" == "yes" && -z "$VMID_FLAG" ]]; then
+        VMID="$(next_free_vmid "100")"
+        info "Auto-selected next free VM ID: $VMID"
+        return
+    fi
+
+    # Set VMID from flag, config default, or interactive prompt
     if [[ -z "${VMID:-}" ]]; then
         if [[ "$UNATTENDED" == "yes" ]]; then
             VMID="$VMID_DEFAULT"
@@ -559,11 +602,11 @@ get_valid_vmid() {
             return
         fi
 
-        # --auto-vmid path
+        # --auto-vmid with explicit --vmid: increment from the requested ID
         if [[ "$AUTO_VMID" == "yes" ]]; then
             local original_vmid="$VMID"
             VMID="$(next_free_vmid "$VMID")"
-            warn "VM ID $original_vmid already exists. Auto-incremented to next free ID: $VMID"
+            warn "VM ID $original_vmid already exists. Next free ID from there: $VMID"
             return
         fi
 
@@ -592,10 +635,38 @@ get_valid_vmid() {
 #   1. Paste a public key directly
 #   2. Provide a path to a .pub file
 #   3. Pick from keys found in ~/.ssh/ on this Proxmox host
-#   4. Fetch from GitHub by username (cloud-init accepts github.com/<user> URLs)
+#   4. Fetch from GitHub by username
 #   5. Skip (no SSH key)
 # If a key was loaded from a config file, user can keep, replace, or clear it.
+#
+# Note: GitHub strips comments server-side — keys fetched from github.com/<user>.keys
+# arrive without a comment field regardless of how they were uploaded. All methods
+# therefore prompt for a comment if one is not already present.
 # =============================================================================
+
+# Checks whether a key string has a comment (3rd field). If not, prompts the
+# user to add one. Returns the key string (with comment appended if provided).
+_ensure_key_comment() {
+    local key="$1"
+    local field_count
+    field_count=$(awk '{print NF}' <<< "$key")
+    if (( field_count >= 3 )); then
+        echo "$key"
+        return
+    fi
+    # Redirect UI to stderr — this function is called inside $() so stdout
+    # is captured into SSH_KEY; any echo to stdout other than the key itself
+    # would corrupt the value.
+    echo "" >&2
+    info "This key has no comment — Proxmox will show it as blank in the UI." >&2
+    read -rp "  Add a comment (e.g. hostname or key purpose, leave blank to skip): " comment
+    if [[ -n "$comment" ]]; then
+        echo "$key $comment"
+    else
+        echo "$key"
+    fi
+}
+
 _prompt_ssh_key() {
     echo ""
     header "SSH Key"
@@ -624,7 +695,7 @@ _prompt_ssh_key() {
     echo "  1) Paste the public key now"
     echo "  2) Enter a path to a .pub file"
     echo "  3) Choose from keys in ~/.ssh/ on this host"
-    echo "  4) Fetch from GitHub (stores as github.com/<username>)"
+    echo "  4) Fetch from GitHub (by username)"
     echo "  5) Skip — no SSH key"
     echo ""
     read -rp "Choice [1]: " method
@@ -637,7 +708,7 @@ _prompt_ssh_key() {
                 warn "No key entered. SSH key will not be set."
                 SSH_KEY=""
             else
-                SSH_KEY="$input"
+                SSH_KEY="$(_ensure_key_comment "$input")"
                 success "Key accepted."
             fi
             ;;
@@ -648,7 +719,7 @@ _prompt_ssh_key() {
                 warn "File not found: $pub_path — SSH key will not be set."
                 SSH_KEY=""
             else
-                SSH_KEY="$(cat "$pub_path")"
+                SSH_KEY="$(_ensure_key_comment "$(cat "$pub_path")")"
                 success "Key loaded from: $pub_path"
             fi
             ;;
@@ -670,7 +741,7 @@ _prompt_ssh_key() {
             echo ""
             read -rp "Select key (number): " sel
             if [[ "$sel" =~ ^[0-9]+$ ]] && (( sel >= 1 && sel <= ${#pub_files[@]} )); then
-                SSH_KEY="$(cat "${pub_files[$((sel-1))]}")"
+                SSH_KEY="$(_ensure_key_comment "$(cat "${pub_files[$((sel-1))]}")")"
                 success "Key loaded: ${pub_files[$((sel-1))]}"
             else
                 warn "Invalid selection — SSH key will not be set."
@@ -683,17 +754,18 @@ _prompt_ssh_key() {
                 warn "No username entered — SSH key will not be set."
                 SSH_KEY=""
             else
-                # Proxmox qm sshkey accepts a URL directly; cloud-init resolves it at boot
-                SSH_KEY="github.com/${gh_user}"
-                # Validate the GitHub user actually has public keys
-                local gh_check
-                gh_check=$(wget -qO- "https://github.com/${gh_user}.keys" 2>/dev/null || true)
-                if [[ -z "$gh_check" ]]; then
+                info "Fetching keys from github.com/${gh_user}..."
+                local gh_keys
+                gh_keys=$(wget -qO- "https://github.com/${gh_user}.keys" 2>/dev/null || true)
+                if [[ -z "$gh_keys" ]]; then
                     warn "No public keys found for GitHub user '${gh_user}'."
-                    warn "The key URL will still be set — double-check the username."
+                    warn "SSH key will not be set — double-check the username."
+                    SSH_KEY=""
+                else
+                    # GitHub strips comments — store the raw key and prompt for comment
+                    SSH_KEY="$(_ensure_key_comment "$gh_keys")"
+                    success "GitHub key set for user: $gh_user"
                 fi
-                success "GitHub key URL set: $SSH_KEY"
-                info "Keys will be fetched from github.com at VM first boot via cloud-init."
             fi
             ;;
         5)
@@ -877,7 +949,7 @@ user_prompts() {
     # In unattended mode all values come from the config file.
     # Password is always auto-generated (never saved to config).
     if [[ "$UNATTENDED" == "yes" ]]; then
-        TEMPL_NAME="${TEMPL_NAME_DEFAULT}"
+        TEMPL_NAME="${TEMPL_NAME:-$TEMPL_NAME_DEFAULT}"
         CLOUD_USER="${CLOUD_USER_DEFAULT}"
         CLOUD_PASSWORD="${CLOUD_PASSWORD_DEFAULT}"
         EXTRA_VIRT_PKGS="${EXTRA_VIRT_PKGS:-}"
@@ -888,9 +960,13 @@ user_prompts() {
 
     header "Template Configuration"
 
-    # Template name
-    read -rp "Template name [${TEMPL_NAME_DEFAULT}]: " input
-    TEMPL_NAME="${input:-$TEMPL_NAME_DEFAULT}"
+    # Template name — use --name flag value if already set
+    if [[ -z "${TEMPL_NAME:-}" ]]; then
+        read -rp "Template name [${TEMPL_NAME_DEFAULT}]: " input
+        TEMPL_NAME="${input:-$TEMPL_NAME_DEFAULT}"
+    else
+        info "Using template name from --name flag: $TEMPL_NAME"
+    fi
 
     # Cloud-init user
     read -rp "Cloud-Init username [${CLOUD_USER_DEFAULT}]: " input
@@ -1106,141 +1182,134 @@ create_vm() {
 
     info "Creating VM $VMID ($TEMPL_NAME)..."
     qm create "$VMID" \
-        --name "$TEMPL_NAME" \
-        --memory "$MEM" \
-        --balloon "$BALLOON" \
-        --cores "$CORES" \
-        --cpu "$CPU_TYPE" \
-        --bios "$BIOS" \
-        --machine "$MACHINE" \
-        --net0 "$net_opts"
-
-    qm set "$VMID" --agent "enabled=${AGENT_ENABLE},fstrim_cloned_disks=${FSTRIM}"
-    qm set "$VMID" --ostype "$OS_TYPE"
+        --name       "$TEMPL_NAME" \
+        --memory     "$MEM" \
+        --balloon    "$BALLOON" \
+        --cores      "$CORES" \
+        --cpu        "$CPU_TYPE" \
+        --bios       "$BIOS" \
+        --machine    "$MACHINE" \
+        --ostype     "$OS_TYPE" \
+        --agent      "enabled=${AGENT_ENABLE},fstrim_cloned_disks=${FSTRIM}" \
+        --net0       "$net_opts" \
+        --tags       "$TAG" \
+        --rng0       "source=/dev/urandom" \
+        --boot       "c" \
+        --bootdisk   "scsi0" \
+        --tablet     "0" \
+        --ipconfig0  "ip=dhcp" \
+        --ciuser     "$CLOUD_USER" \
+        --cipassword "$CLOUD_PASSWORD" \
+        --ciupgrade  "0"
+    # Mark VM as created — error handler will destroy it if anything fails from here
+    VMID_CREATED="$VMID"
 
     info "Importing disk (format: $STORAGE_FORMAT, backend: $STORAGE_BACKEND)..."
-
-    # importdisk handles format selection; path returned varies by backend
     if [[ "$STORAGE_FORMAT" == "raw" ]]; then
         qm importdisk "$VMID" "$WORK_DIR/$DISK_IMAGE" "$DISK_STOR"
     else
         qm importdisk "$VMID" "$WORK_DIR/$DISK_IMAGE" "$DISK_STOR" -format qcow2
     fi
 
-    # Resolve the imported disk reference — differs between ZFS/LVM and dir
+    # Disk reference format differs only for dir-backed storage
     local disk_ref
-    case "$STORAGE_BACKEND" in
-        zfs)
-            disk_ref="${DISK_STOR}:vm-${VMID}-disk-0"
-            ;;
-        lvm)
-            disk_ref="${DISK_STOR}:vm-${VMID}-disk-0"
-            ;;
-        dir)
-            disk_ref="${DISK_STOR}:${VMID}/vm-${VMID}-disk-0.qcow2"
-            ;;
-    esac
-
-    qm set "$VMID" \
-        --scsihw virtio-scsi-single \
-        --scsi0 "${disk_ref},cache=writethrough,discard=on,iothread=1,ssd=1"
-
-    # EFI disk — ms-cert=2023k uses the newer 2023 Microsoft Secure Boot certificates
     if [[ "$STORAGE_BACKEND" == "dir" ]]; then
-        qm set "$VMID" \
-            --efidisk0 "${DISK_STOR}:0,efitype=4m,format=qcow2,ms-cert=2023k,pre-enrolled-keys=1,size=1M"
+        disk_ref="${DISK_STOR}:${VMID}/vm-${VMID}-disk-0.qcow2"
     else
-        qm set "$VMID" \
-            --efidisk0 "${DISK_STOR}:0,efitype=4m,ms-cert=2023k,pre-enrolled-keys=1,size=1M"
+        disk_ref="${DISK_STOR}:vm-${VMID}-disk-0"
     fi
 
-    qm set "$VMID" --tags "$TAG"
-    qm set "$VMID" --scsi1 "${DISK_STOR}:cloudinit"
-    qm set "$VMID" --rng0 source=/dev/urandom
-    qm set "$VMID" --ciuser "$CLOUD_USER"
-    qm set "$VMID" --cipassword "$CLOUD_PASSWORD"
-    # Disable cloud-init's automatic package upgrade on first boot.
-    # Upgrades should be done deliberately, not silently on every clone boot.
-    qm set "$VMID" --ciupgrade 0
-    qm set "$VMID" --boot c --bootdisk scsi0
-    qm set "$VMID" --tablet 0
-    qm set "$VMID" --ipconfig0 ip=dhcp
+    # EFI disk format option differs only for dir-backed storage
+    local efi_fmt=""
+    [[ "$STORAGE_BACKEND" == "dir" ]] && efi_fmt=",format=qcow2"
+
+    qm set "$VMID" \
+        --scsihw  "virtio-scsi-single" \
+        --scsi0   "${disk_ref},cache=writethrough,discard=on,iothread=1,ssd=1" \
+        --scsi1   "${DISK_STOR}:cloudinit" \
+        --efidisk0 "${DISK_STOR}:0,efitype=4m${efi_fmt},ms-cert=2023k,pre-enrolled-keys=1,size=1M"
+
     qm cloudinit update "$VMID"
 
-    # Notes
-    local notes
-    notes=$(cat <<EOF
-OS: ${OS_NAME}
-Template created: $(date '+%Y-%m-%d %H:%M')
-Storage: ${DISK_STOR} (${STORAGE_BACKEND}/${STORAGE_FORMAT})
-CPU type: ${CPU_TYPE}
-Cloud-Init user: ${CLOUD_USER}
+    # qm set --description mangles newlines when passed through shell expansion.
+    # Write directly via python3 which handles multiline strings cleanly.
+    python3 - "$VMID" <<PYEOF
+import subprocess, sys
+vmid = sys.argv[1]
+desc = """\
+**OS:** ${OS_NAME}
 
-=== Notes ===
+**Template created:** $(date '+%Y-%m-%d %H:%M')
 
-SSH password authentication is DISABLED by default in Ubuntu cloud images.
-If you are not using an SSH key, enable it in the cloud-init user-data
-snippet, or add this to /etc/ssh/sshd_config after first boot:
-  PasswordAuthentication yes
+**Storage:** ${DISK_STOR} (${STORAGE_BACKEND}/${STORAGE_FORMAT})
 
-Automatic package upgrades on first boot are disabled (ciupgrade=0).
-Run upgrades manually or via your config management tool after cloning.
+**CPU type:** ${CPU_TYPE}
 
-=== Before re-templating this VM, run inside it: ===
+**Cloud-Init user:** ${CLOUD_USER}
 
-apt-get clean \
-&& apt -y autoremove --purge \
-&& apt -y autoclean \
-&& cloud-init clean \
-&& echo -n > /etc/machine-id \
-&& echo -n > /var/lib/dbus/machine-id \
-&& sync \
-&& history -c \
-&& history -w \
-&& fstrim -av \
+---
+
+### Notes
+
+> **SSH password authentication is DISABLED** by default in Ubuntu cloud images.
+> If you are not using an SSH key, enable it in the cloud-init user-data snippet,
+> or add this to \`/etc/ssh/sshd_config\` after first boot:
+> \`PasswordAuthentication yes\`
+
+> **Automatic package upgrades on first boot are disabled** (\`ciupgrade=0\`).
+> Run upgrades manually or via your config management tool after cloning.
+
+---
+
+### Before re-templating this VM, run inside it:
+
+\`\`\`
+apt-get clean
+&& apt -y autoremove --purge
+&& apt -y autoclean
+&& cloud-init clean
+&& echo -n > /etc/machine-id
+&& echo -n > /var/lib/dbus/machine-id
+&& sync
+&& history -c
+&& history -w
+&& fstrim -av
 && shutdown now
-EOF
-)
-    qm set "$VMID" --description "$notes"
-
+\`\`\`
+"""
+subprocess.run(["qm", "set", vmid, "--description", desc], check=True)
+PYEOF
     success "VM $VMID created."
 }
 
 # =============================================================================
-# =============================================================================
 # SSH key
 # =============================================================================
-# qm set --sshkeys <filepath> expects a real file path (one key per line,
-# OpenSSH format) — it does not accept process substitution, inline strings,
-# or URLs. For literal keys we write to a temp file. For GitHub usernames we
-# download the keys from github.com/<user>.keys first, then pass the same
-# temp file.
+# qm set --sshkeys expects a real file path (one key per line, OpenSSH format).
+# GitHub keys are now fetched and comment-checked during _prompt_ssh_key, so
+# by this point SSH_KEY is always a literal key string regardless of source.
 # =============================================================================
 apply_ssh_key() {
     [[ -z "${SSH_KEY:-}" ]] && return
-
     header "SSH Key"
 
-    local tmp_key
-    tmp_key=$(mktemp /tmp/proxmox-sshkey-XXXXXX.pub)
+    local key="${SSH_KEY}"
 
-    if [[ "$SSH_KEY" == github.com/* ]]; then
-        local gh_url="https://${SSH_KEY}.keys"
-        info "Fetching SSH keys from $gh_url..."
-        wget -qO "$tmp_key" "$gh_url" || { rm -f "$tmp_key"; die "Failed to fetch SSH keys from $gh_url"; }
-        if [[ ! -s "$tmp_key" ]]; then
-            rm -f "$tmp_key"
-            die "No SSH keys found at $gh_url — check the GitHub username and ensure the account has public keys."
+    # Handle legacy config entries where SSH_KEY was saved as "github.com/<user>"
+    # instead of the actual fetched key string. Fetch the real key on the fly.
+    if [[ "$key" == github.com/* ]]; then
+        local gh_user="${key#github.com/}"
+        info "Config contains a GitHub reference — fetching key for user: $gh_user"
+        key=$(wget -qO- "https://github.com/${gh_user}.keys" 2>/dev/null | tr -d '\r\n' || true)
+        if [[ -z "$key" ]]; then
+            die "Could not fetch SSH key from github.com/${gh_user}.keys — check the username and your internet connection."
         fi
-        local key_count
-        key_count=$(wc -l < "$tmp_key")
-        info "Fetched ${key_count} key(s) from GitHub."
-    else
-        printf '%s\n' "${SSH_KEY}" > "$tmp_key"
+        # Update SSH_KEY so write_config saves the literal key going forward
+        SSH_KEY="$key"
+        info "Key fetched. Profile will be updated with the literal key on next save."
     fi
 
-    qm set "$VMID" --sshkeys "$tmp_key"
-    rm -f "$tmp_key"
+    qm set "$VMID" --sshkey <(echo "${key}")
     success "SSH key applied."
 }
 
@@ -1301,6 +1370,8 @@ cleanup() {
 
     [[ -f "$cfg" ]]           && rm -vf "$cfg"
     [[ -f "$checksum_file" ]] && rm -vf "$checksum_file"
+    # Clean up any leftover notes temp files
+    rm -f /tmp/proxmox-notes-*.txt 2>/dev/null || true
 
     # Working image (virt-customised) — always remove, it's single-use
     local image_path="$WORK_DIR/${DISK_IMAGE:-}"
@@ -1312,17 +1383,21 @@ cleanup() {
     # Pristine image — offer to keep for future runs (saves re-downloading)
     local pristine_path="$WORK_DIR/${DISK_IMAGE:-}.pristine"
     if [[ -n "${DISK_IMAGE:-}" && -f "$pristine_path" ]]; then
-        echo ""
-        echo "  The pristine (unmodified) image is kept at:"
-        echo "  $pristine_path"
-        echo "  Keeping it avoids re-downloading on future runs (~$(du -sh "$pristine_path" | cut -f1))."
-        read -rp "  Delete the pristine image? (y/N): " choice
-        choice="${choice:-N}"
-        if [[ "$choice" =~ ^[Yy]$ ]]; then
-            rm -vf "$pristine_path"
-            success "Pristine image deleted."
+        if [[ "$UNATTENDED" == "yes" ]]; then
+            info "Unattended mode — keeping pristine image for future runs."
         else
-            info "Pristine image kept for future runs."
+            echo ""
+            echo "  The pristine (unmodified) image is kept at:"
+            echo "  $pristine_path"
+            echo "  Keeping it avoids re-downloading on future runs (~$(du -sh "$pristine_path" | cut -f1))."
+            read -rp "  Delete the pristine image? (y/N): " choice
+            choice="${choice:-N}"
+            if [[ "$choice" =~ ^[Yy]$ ]]; then
+                rm -vf "$pristine_path"
+                success "Pristine image deleted."
+            else
+                info "Pristine image kept for future runs."
+            fi
         fi
     fi
 }
@@ -1557,6 +1632,9 @@ main() {
         echo ""
         info "To change the password in Proxmox: qm set $VMID --cipassword '<newpassword>' && qm cloudinit update $VMID"
     fi
+
+    # Disarm the error handler — run completed successfully
+    VMID_CREATED=""
 }
 
 main "$@"
