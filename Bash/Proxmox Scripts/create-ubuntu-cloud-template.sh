@@ -1223,9 +1223,15 @@ create_vm() {
     local efi_fmt=""
     [[ "$STORAGE_BACKEND" == "dir" ]] && efi_fmt=",format=qcow2"
 
+    # ZFS manages its own caching (ARC); adding a host-level cache layer causes
+    # double-buffering and can corrupt data on power loss. Use the Proxmox
+    # "Default (no cache)" value (cache=none) for ZFS, write-through elsewhere.
+    local disk_cache="writethrough"
+    [[ "$STORAGE_BACKEND" == "zfs" ]] && disk_cache="none"
+
     qm set "$VMID" \
         --scsihw  "virtio-scsi-single" \
-        --scsi0   "${disk_ref},cache=writethrough,discard=on,iothread=1,ssd=1" \
+        --scsi0   "${disk_ref},cache=${disk_cache},discard=on,iothread=1,ssd=1" \
         --scsi1   "${DISK_STOR}:cloudinit" \
         --efidisk0 "${DISK_STOR}:0,efitype=4m${efi_fmt},ms-cert=2023k,pre-enrolled-keys=1,size=1M"
 
@@ -1545,7 +1551,9 @@ print_summary() {
     printf "  %-24s %s\n" "OS:"                   "$OS_NAME"
     printf "  %-24s %s\n" "VM ID:"                "$VMID"
     printf "  %-24s %s\n" "Template name:"        "$TEMPL_NAME"
-    printf "  %-24s %s\n" "Storage:"              "$DISK_STOR ($STORAGE_BACKEND / $STORAGE_FORMAT)"
+    local cache_display="writethrough"
+    [[ "$STORAGE_BACKEND" == "zfs" ]] && cache_display="none (ZFS default)"
+    printf "  %-24s %s\n" "Storage:"              "$DISK_STOR ($STORAGE_BACKEND / $STORAGE_FORMAT, cache=$cache_display)"
     printf "  %-24s %s\n" "Disk size:"            "$DISK_SIZE"
     printf "  %-24s %s\n" "CPUs / RAM:"           "$CORES cores / ${MEM}MB (balloon: ${BALLOON}MB)"
     printf "  %-24s %s\n" "BIOS / Machine:"       "$BIOS / $MACHINE"
