@@ -47,7 +47,7 @@ run()  {
 }
 
 echo "========================================"
-echo " ZFS Tuning Script — $(hostname)"
+echo " ZFS Tune — $(hostname)"
 [[ $DRY_RUN -eq 1 ]] && echo " Mode: DRY RUN (no changes will be made)"
 echo "========================================"
 echo
