@@ -1,14 +1,30 @@
-name: Issue assignment
+name: Issue and PR assignment
 
 on:
   issues:
     types: [opened]
+  pull_request:
+    types: [opened]
 
 jobs:
-  auto-assign:
+  auto-assign-issue:
+    if: github.event_name == 'issues'
     runs-on: ubuntu-latest
+    permissions:
+      issues: write
     steps:
         - name: 'Auto-assign issue'
+          uses: pozil/auto-assign-issue@v4.0.1
+          with:
+            assignees: modem7
+
+  auto-assign-pr:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+    steps:
+        - name: 'Auto-assign PR'
           uses: pozil/auto-assign-issue@v4.0.1
           with:
             assignees: modem7
