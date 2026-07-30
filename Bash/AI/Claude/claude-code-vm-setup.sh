@@ -29,6 +29,10 @@
 #  - Idempotent: safe to re-run. apt installs, GitHub CLI auth, SSH key
 #    generation, shell rc blocks, and the webapp-testing skill copy all check
 #    existing state before acting instead of blindly re-doing/duplicating it.
+#  - Claude Code itself installs from Anthropic's signed apt repo (gpg
+#    fingerprint verified against the published key), not the curl|bash
+#    native installer — same binary, but plain `apt upgrade claude-code`
+#    updates instead of a self-updating background process.
 #  - Shell env (PATH, aliases, cargo env, project auto-cd) is written to both
 #    ~/.bashrc and ~/.zshrc (if zsh is installed), each idempotently.
 #
@@ -306,16 +310,23 @@ provision() {
     info "Skipping GitHub CLI + SSH/auth setup (declined). Re-run this script section later, or install gh manually."
   fi
 
-  CURRENT_STEP="Installing Claude Code"
-  echo ">>> Installing Claude Code (native installer)..."
-  curl -fsSL https://claude.ai/install.sh | bash
-  # Ensure claude is on PATH for all sessions
-  if [[ -f "$HOME/.local/bin/claude" ]]; then
-    sudo ln -sf "$HOME/.local/bin/claude" /usr/local/bin/claude 2>/dev/null || true
-  elif [[ -f "$HOME/.claude/bin/claude" ]]; then
-    sudo ln -sf "$HOME/.claude/bin/claude" /usr/local/bin/claude 2>/dev/null || true
+  CURRENT_STEP="Installing Claude Code (apt)"
+  echo ">>> Installing Claude Code (via Anthropic's signed apt repo)..."
+  # Uses Anthropic's official apt repo rather than the curl|bash native
+  # installer: same underlying binary, but plain apt-managed updates
+  # (sudo apt update && sudo apt upgrade claude-code) instead of a
+  # self-updating background process, and gpg-verified end to end.
+  CLAUDE_APT_KEYRING="/etc/apt/keyrings/claude-code.asc"
+  sudo install -d -m 0755 /etc/apt/keyrings
+  sudo curl -fsSL https://downloads.claude.ai/keys/claude-code.asc -o "$CLAUDE_APT_KEYRING"
+  CLAUDE_KEY_FPR=$(gpg --show-keys --with-colons "$CLAUDE_APT_KEYRING" 2>/dev/null | awk -F: '/^fpr:/ { print $10; exit }')
+  if [[ "$CLAUDE_KEY_FPR" != "31DDDE24DDFAB679F42D7BD2BAA929FF1A7ECACE" ]]; then
+    error "Claude Code apt signing key fingerprint mismatch (got: ${CLAUDE_KEY_FPR:-none}, expected 31DDDE24DDFAB679F42D7BD2BAA929FF1A7ECACE) - refusing to trust it. See https://code.claude.com/docs/en/setup#install-with-linux-package-managers"
   fi
-  echo "    Claude Code installed"
+  echo "deb [signed-by=${CLAUDE_APT_KEYRING}] https://downloads.claude.ai/claude-code/apt/stable stable main" | sudo tee /etc/apt/sources.list.d/claude-code.list > /dev/null
+  sudo apt-get update -qq
+  apt_install claude-code
+  echo "    Claude Code $(claude --version 2>/dev/null || echo 'installed')"
 
   CURRENT_STEP="Configuring Claude Code permissions + plugins"
   echo ">>> Configuring Claude Code permissions + plugins..."
@@ -624,7 +635,7 @@ print_summary() {
   echo -e "       find this VM's session in the session list (or claude.ai/code) to drive it remotely"
   echo ""
   echo -e "  ${BOLD}Installed:${NC}"
-  echo "    • Claude Code (native)    • Node.js 22 LTS"
+  echo "    • Claude Code (apt)       • Node.js 22 LTS"
   echo "    • Python 3 + pip + venv   • Go (latest)"
   echo "    • Rust (via rustup)       • Build essentials"
   echo "    • ripgrep, fzf, fd        • PostgreSQL & Redis CLI"
