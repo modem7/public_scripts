@@ -130,11 +130,22 @@ if [[ "$MODE" == "revert" ]]; then
 
   if [[ "${PKG_ZRAM_CONFIG_WAS_INSTALLED:-false}" == "true" ]]; then
     dpkg -s zram-config >/dev/null 2>&1 || apt install -y zram-config
+
+    # apt's postinst may have already started the service with the stock
+    # script before we get a chance to restore ours — tear that down first,
+    # otherwise the already-active devices mean our script never re-runs.
+    systemctl stop zram-config 2>/dev/null || true
+    for zdev in /dev/zram*; do
+      [[ -b "$zdev" ]] || continue
+      swapon --show=NAME --noheadings | grep -qx "$zdev" && swapoff "$zdev"
+      echo 1 > "/sys/block/$(basename "$zdev")/reset" 2>/dev/null || true
+    done
+
     if [[ -f "$BACKUP_DIR/init-zram-swapping.bak" ]]; then
       cp -a "$BACKUP_DIR/init-zram-swapping.bak" /usr/bin/init-zram-swapping
       chmod +x /usr/bin/init-zram-swapping
     fi
-    systemctl enable --now zram-config 2>/dev/null || /usr/bin/init-zram-swapping
+    systemctl restart zram-config 2>/dev/null || /usr/bin/init-zram-swapping
   fi
 
   hr "Result"
