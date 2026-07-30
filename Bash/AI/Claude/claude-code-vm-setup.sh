@@ -16,15 +16,23 @@
 #    inbound ports needed).
 #  - Locale set to en_GB.UTF-8. Ctrl+C during the run is trapped for a clean
 #    exit instead of leaving background processes or a half-configured apt.
-#  - Plugins: added docker, github (both official, no extra marketplace) and
-#    deployment-engineer (community, from ccplugins/awesome-claude-code-plugins).
-#    Skipped "Dependency Auditor" and "Env Manager" from claudedirectory.org —
-#    their listing gives no real installable marketplace source (the site's
-#    own repo is just the directory's website, not a plugin marketplace), so
-#    adding them would likely fail at /plugin install time.
+#  - Only languages, build tools, and Claude Code itself are unconditional.
+#    Docker, GitHub CLI + SSH/auth, the recommended plugin bundle, and the
+#    webapp-testing skill + Playwright are each asked about up front (Y/n,
+#    default yes) as opinionated good-practice extras — decline any of them
+#    and the generated settings.json / CLAUDE.md reflect that (no dangling
+#    references to tools that were never installed).
+#  - Plugin bundle (if accepted): frontend-design, code-review,
+#    commit-commands, security-guidance, context7, superpowers,
+#    deployment-engineer (community, from ccplugins/awesome-claude-code-plugins),
+#    plus docker/github plugins if those extras were also accepted.
 #  - Idempotent: safe to re-run. apt installs, GitHub CLI auth, SSH key
 #    generation, shell rc blocks, and the webapp-testing skill copy all check
 #    existing state before acting instead of blindly re-doing/duplicating it.
+#  - Claude Code itself installs from Anthropic's signed apt repo (gpg
+#    fingerprint verified against the published key), not the curl|bash
+#    native installer — same binary, but plain `apt upgrade claude-code`
+#    updates instead of a self-updating background process.
 #  - Shell env (PATH, aliases, cargo env, project auto-cd) is written to both
 #    ~/.bashrc and ~/.zshrc (if zsh is installed), each idempotently.
 #
@@ -102,7 +110,7 @@ preflight() {
   fi
 }
 
-# ── GitHub / Git identity (asked up front so the long install can run unattended) ──
+# ── Git identity + optional extras (asked up front so the long install can run unattended) ──
 get_git_config() {
   echo -e "${BOLD}Git / GitHub Setup${NC}"
   echo "─────────────────────────────────────────────────"
@@ -119,8 +127,24 @@ get_git_config() {
   GIT_EMAIL="${GIT_EMAIL:-$default_email}"
   [[ -n "$GIT_EMAIL" ]] || error "Git user.email is required."
 
-  read -rp "Set up GitHub access now (SSH key + 'gh auth login')? [Y/n]: " SETUP_GITHUB
+  read -rp "Set up GitHub access now (installs gh CLI + SSH key + 'gh auth login')? [Y/n]: " SETUP_GITHUB
   SETUP_GITHUB="${SETUP_GITHUB:-y}"
+  echo ""
+
+  echo -e "${BOLD}Optional Extras${NC}"
+  echo "─────────────────────────────────────────────────"
+  echo "The base install above (languages, build tools, Claude Code itself) always runs."
+  echo "These are opinionated good-practice additions on top of it — decline any you don't want."
+  echo ""
+
+  read -rp "Install Docker Engine + Compose plugin? [Y/n]: " INSTALL_DOCKER
+  INSTALL_DOCKER="${INSTALL_DOCKER:-y}"
+
+  read -rp "Install the recommended Claude Code plugin bundle (frontend-design, code-review, commit-commands, security-guidance, context7, superpowers, deployment-engineer — plus docker/github plugins if you installed those above)? [Y/n]: " INSTALL_PLUGINS
+  INSTALL_PLUGINS="${INSTALL_PLUGINS:-y}"
+
+  read -rp "Install the webapp-testing skill + Playwright (browser-based UI testing for Claude Code)? [Y/n]: " INSTALL_WEBAPP_TESTING
+  INSTALL_WEBAPP_TESTING="${INSTALL_WEBAPP_TESTING:-y}"
   echo ""
 }
 
@@ -212,25 +236,29 @@ provision() {
   source "$HOME/.cargo/env"
   echo "    Rust $(rustc --version | awk '{print $2}')"
 
-  CURRENT_STEP="Installing Docker"
-  echo ">>> Installing Docker..."
-  curl -fsSL https://get.docker.com | sudo sh
-  sudo systemctl enable docker
-  sudo apt-get install -y -qq docker-compose-plugin 2>/dev/null || true
-  echo "    Docker $(sudo docker --version | awk '{print $3}' | tr -d ',')"
-  echo "    Compose $(sudo docker compose version --short 2>/dev/null || echo 'included with Docker')"
+  if [[ "${INSTALL_DOCKER,,}" == y* ]]; then
+    CURRENT_STEP="Installing Docker"
+    echo ">>> Installing Docker..."
+    curl -fsSL https://get.docker.com | sudo sh
+    sudo systemctl enable docker
+    sudo apt-get install -y -qq docker-compose-plugin 2>/dev/null || true
+    echo "    Docker $(sudo docker --version | awk '{print $3}' | tr -d ',')"
+    echo "    Compose $(sudo docker compose version --short 2>/dev/null || echo 'included with Docker')"
 
-  CURRENT_STEP="Adding user to docker group"
-  echo ">>> Adding $USER to the docker group (run docker without sudo)..."
-  # get.docker.com's installer creates the docker group as part of installing
-  # docker-ce, but groupadd here is a harmless, idempotent safety net in case
-  # that ever changes or the group was removed some other way.
-  getent group docker >/dev/null 2>&1 || sudo groupadd docker
-  sudo usermod -aG docker "$USER"
-  if groups | grep -qw docker; then
-    info "docker group already active in this session."
+    CURRENT_STEP="Adding user to docker group"
+    echo ">>> Adding $USER to the docker group (run docker without sudo)..."
+    # get.docker.com's installer creates the docker group as part of installing
+    # docker-ce, but groupadd here is a harmless, idempotent safety net in case
+    # that ever changes or the group was removed some other way.
+    getent group docker >/dev/null 2>&1 || sudo groupadd docker
+    sudo usermod -aG docker "$USER"
+    if groups | grep -qw docker; then
+      info "docker group already active in this session."
+    else
+      warn "You must log out and back in (or run 'newgrp docker') before 'docker' works without sudo."
+    fi
   else
-    warn "You must log out and back in (or run 'newgrp docker') before 'docker' works without sudo."
+    info "Skipping Docker (declined)."
   fi
 
   CURRENT_STEP="Setting up Git identity"
@@ -241,18 +269,18 @@ provision() {
   git config --global core.editor nano
   git config --global pull.rebase false
 
-  CURRENT_STEP="Installing GitHub CLI (gh)"
-  echo ">>> Installing GitHub CLI (gh)..."
-  sudo mkdir -p -m 755 /etc/apt/keyrings
-  curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo tee /etc/apt/keyrings/githubcli-archive-keyring.gpg > /dev/null
-  sudo chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg
-  echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null
-  sudo apt-get update -qq
-  apt_install gh
-  echo "    gh $(gh --version | head -1 | awk '{print $3}')"
-
   GITHUB_SSH_KEY="$HOME/.ssh/id_ed25519"
   if [[ "${SETUP_GITHUB,,}" == "y" || "${SETUP_GITHUB,,}" == "yes" ]]; then
+    CURRENT_STEP="Installing GitHub CLI (gh)"
+    echo ">>> Installing GitHub CLI (gh)..."
+    sudo mkdir -p -m 755 /etc/apt/keyrings
+    curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo tee /etc/apt/keyrings/githubcli-archive-keyring.gpg > /dev/null
+    sudo chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null
+    sudo apt-get update -qq
+    apt_install gh
+    echo "    gh $(gh --version | head -1 | awk '{print $3}')"
+
     CURRENT_STEP="Setting up SSH key for GitHub"
     echo ">>> Setting up SSH key for GitHub..."
     mkdir -p "$HOME/.ssh" && chmod 700 "$HOME/.ssh"
@@ -279,30 +307,33 @@ provision() {
     fi
     gh auth setup-git 2>/dev/null || true
   else
-    info "Skipping GitHub auth setup. Run this later: gh auth login"
+    info "Skipping GitHub CLI + SSH/auth setup (declined). Re-run this script section later, or install gh manually."
   fi
 
-  CURRENT_STEP="Installing Claude Code"
-  echo ">>> Installing Claude Code (native installer)..."
-  curl -fsSL https://claude.ai/install.sh | bash
-  # Ensure claude is on PATH for all sessions
-  if [[ -f "$HOME/.local/bin/claude" ]]; then
-    sudo ln -sf "$HOME/.local/bin/claude" /usr/local/bin/claude 2>/dev/null || true
-  elif [[ -f "$HOME/.claude/bin/claude" ]]; then
-    sudo ln -sf "$HOME/.claude/bin/claude" /usr/local/bin/claude 2>/dev/null || true
+  CURRENT_STEP="Installing Claude Code (apt)"
+  echo ">>> Installing Claude Code (via Anthropic's signed apt repo)..."
+  # Uses Anthropic's official apt repo rather than the curl|bash native
+  # installer: same underlying binary, but plain apt-managed updates
+  # (sudo apt update && sudo apt upgrade claude-code) instead of a
+  # self-updating background process, and gpg-verified end to end.
+  CLAUDE_APT_KEYRING="/etc/apt/keyrings/claude-code.asc"
+  sudo install -d -m 0755 /etc/apt/keyrings
+  sudo curl -fsSL https://downloads.claude.ai/keys/claude-code.asc -o "$CLAUDE_APT_KEYRING"
+  CLAUDE_KEY_FPR=$(gpg --show-keys --with-colons "$CLAUDE_APT_KEYRING" 2>/dev/null | awk -F: '/^fpr:/ { print $10; exit }')
+  if [[ "$CLAUDE_KEY_FPR" != "31DDDE24DDFAB679F42D7BD2BAA929FF1A7ECACE" ]]; then
+    error "Claude Code apt signing key fingerprint mismatch (got: ${CLAUDE_KEY_FPR:-none}, expected 31DDDE24DDFAB679F42D7BD2BAA929FF1A7ECACE) - refusing to trust it. See https://code.claude.com/docs/en/setup#install-with-linux-package-managers"
   fi
-  echo "    Claude Code installed"
+  echo "deb [signed-by=${CLAUDE_APT_KEYRING}] https://downloads.claude.ai/claude-code/apt/stable stable main" | sudo tee /etc/apt/sources.list.d/claude-code.list > /dev/null
+  sudo apt-get update -qq
+  apt_install claude-code
+  echo "    Claude Code $(claude --version 2>/dev/null || echo 'installed')"
 
   CURRENT_STEP="Configuring Claude Code permissions + plugins"
   echo ">>> Configuring Claude Code permissions + plugins..."
   mkdir -p "$HOME/.claude"
 
-  # NOTE: claude-plugins-official is built into every Claude Code install, so its
-  # plugins (frontend-design, code-review, commit-commands, security-guidance,
-  # context7, docker, github) need no marketplace declaration. Third-party
-  # marketplaces (superpowers, awesome-claude-code-plugins) must be declared in
-  # extraKnownMarketplaces. Plugins in enabledPlugins install from their
-  # marketplaces on first launch — no npx/CLI step needed.
+  # Base settings.json: just enough to avoid permission prompts. No personal
+  # opinions baked in here (no plugins, no env tuning) — those are opt-in below.
   cat > "$HOME/.claude/settings.json" << 'SETTINGS'
 {
   "$schema": "https://json.schemastore.org/claude-code-settings.json",
@@ -323,34 +354,39 @@ provision() {
       "Task(*)",
       "mcp__*"
     ]
-  },
-  "env": {
-    "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1",
-    "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "64000",
-    "MAX_THINKING_TOKENS": "31999"
-  },
-  "alwaysThinkingEnabled": true,
-  "extraKnownMarketplaces": {
-    "superpowers-marketplace": {
-      "source": { "source": "github", "repo": "obra/superpowers-marketplace" }
-    },
-    "awesome-claude-code-plugins": {
-      "source": { "source": "github", "repo": "ccplugins/awesome-claude-code-plugins" }
-    }
-  },
-  "enabledPlugins": {
-    "frontend-design@claude-plugins-official": true,
-    "code-review@claude-plugins-official": true,
-    "commit-commands@claude-plugins-official": true,
-    "security-guidance@claude-plugins-official": true,
-    "context7@claude-plugins-official": true,
-    "docker@claude-plugins-official": true,
-    "github@claude-plugins-official": true,
-    "superpowers@superpowers-marketplace": true,
-    "deployment-engineer@awesome-claude-code-plugins": true
   }
 }
 SETTINGS
+
+  if [[ "${INSTALL_PLUGINS,,}" == y* ]]; then
+    echo "    Adding recommended plugin bundle to settings.json..."
+    # claude-plugins-official is built into every Claude Code install, so its
+    # plugins need no marketplace declaration. Third-party marketplaces
+    # (superpowers, awesome-claude-code-plugins) must be declared in
+    # extraKnownMarketplaces. docker/github plugins are only added if the
+    # matching tool was actually installed above.
+    PLUGIN_JSON='{
+      "frontend-design@claude-plugins-official": true,
+      "code-review@claude-plugins-official": true,
+      "commit-commands@claude-plugins-official": true,
+      "security-guidance@claude-plugins-official": true,
+      "context7@claude-plugins-official": true,
+      "superpowers@superpowers-marketplace": true,
+      "deployment-engineer@awesome-claude-code-plugins": true
+    }'
+    [[ "${INSTALL_DOCKER,,}" == y* ]] && PLUGIN_JSON=$(jq '. + {"docker@claude-plugins-official": true}' <<< "$PLUGIN_JSON")
+    [[ "${SETUP_GITHUB,,}" == y* ]] && PLUGIN_JSON=$(jq '. + {"github@claude-plugins-official": true}' <<< "$PLUGIN_JSON")
+
+    tmp=$(mktemp)
+    jq --argjson plugins "$PLUGIN_JSON" '
+      .extraKnownMarketplaces = {
+        "superpowers-marketplace": { "source": { "source": "github", "repo": "obra/superpowers-marketplace" } },
+        "awesome-claude-code-plugins": { "source": { "source": "github", "repo": "ccplugins/awesome-claude-code-plugins" } }
+      } | .enabledPlugins = $plugins
+    ' "$HOME/.claude/settings.json" > "$tmp" && mv "$tmp" "$HOME/.claude/settings.json"
+  else
+    info "Skipping recommended plugin bundle (declined)."
+  fi
 
   CURRENT_STEP="Enabling Claude Code Remote Control auto-start"
   echo ">>> Enabling Claude Code Remote Control auto-start..."
@@ -373,6 +409,62 @@ SETTINGS
   echo ">>> Setting up ~/project directory..."
   mkdir -p "$HOME/project"
 
+  DOCKER_TOOLS_LINE=""
+  DOCKER_USAGE_SECTION=""
+  if [[ "${INSTALL_DOCKER,,}" == y* ]]; then
+    DOCKER_TOOLS_LINE="- **Docker**: Docker Engine + Compose plugin installed (\`$USER\` is in the \`docker\` group; no containers deployed by default)"
+    DOCKER_USAGE_SECTION="
+## Docker Usage
+Docker and the Compose plugin are installed but no services are deployed by default. Log out and
+back in (or run \`newgrp docker\`) so group membership takes effect, then \`docker run hello-world\`
+to verify.
+"
+  fi
+
+  GITHUB_ACCESS_SECTION=""
+  if [[ "${SETUP_GITHUB,,}" == y* ]]; then
+    GITHUB_ACCESS_SECTION="
+## GitHub Access
+- **gh CLI** is installed; auth was configured via \`gh auth login\` during setup (re-run any time).
+- **SSH key**: ~/.ssh/id_ed25519(.pub) — add the public half at https://github.com/settings/keys
+  if it isn't already linked via \`gh\`. github.com's host key is pre-seeded in ~/.ssh/known_hosts.
+- Verify with: \`gh auth status\` and \`ssh -T git@github.com\`.
+- Clone with either \`gh repo clone owner/repo\` or standard \`git clone git@github.com:owner/repo.git\`.
+"
+  fi
+
+  PLUGINS_SECTION=""
+  if [[ "${INSTALL_PLUGINS,,}" == y* ]]; then
+    PLUGINS_SECTION="
+## Installed Plugins
+Declared in ~/.claude/settings.json and installed from their marketplaces on first launch.
+Run /plugin to confirm they're active or add more.
+- **frontend-design** (claude-plugins-official): production-grade UI aesthetics
+- **code-review** (claude-plugins-official): multi-agent PR review with confidence scoring
+- **commit-commands** (claude-plugins-official): git commit/push/PR workflows (/commit, /push, /pr)
+- **security-guidance** (claude-plugins-official): warnings when editing sensitive files
+- **context7** (claude-plugins-official): live, version-specific library docs (reduces API hallucinations)
+- **superpowers** (superpowers-marketplace): brainstorm → plan → implement (TDD) workflow
+  - /superpowers:brainstorm, /superpowers:write-plan, /superpowers:execute-plan
+  - Auto-activating skills: test-driven-development, systematic-debugging, verification-before-completion
+- **deployment-engineer** (awesome-claude-code-plugins, community): CI/CD pipelines, Docker,
+  cloud/Kubernetes deployment workflows"
+    [[ "${INSTALL_DOCKER,,}" == y* ]] && PLUGINS_SECTION="${PLUGINS_SECTION}
+- **docker** (claude-plugins-official): build images, manage containers/Compose, container networking"
+    [[ "${SETUP_GITHUB,,}" == y* ]] && PLUGINS_SECTION="${PLUGINS_SECTION}
+- **github** (claude-plugins-official): issues, PRs, code review, repo search, Actions"
+    PLUGINS_SECTION="${PLUGINS_SECTION}
+"
+  fi
+
+  SKILLS_SECTION=""
+  if [[ "${INSTALL_WEBAPP_TESTING,,}" == y* ]]; then
+    SKILLS_SECTION="
+## Installed Skills
+- **webapp-testing** (~/.claude/skills/): Playwright-based browser testing for UI verification
+"
+  fi
+
   cat > "$HOME/project/CLAUDE.md" << CLAUDEMD
 # Claude Code Workspace
 
@@ -387,21 +479,19 @@ SETTINGS
 ## Available Tools
 - **Languages**: Node.js 22 LTS, Python 3 (system default), Go (latest), Rust (latest)
 - **Package managers**: npm, pip (use --break-system-packages), cargo, go install
-- **Docker**: Docker Engine + Compose plugin installed (\`$USER\` is in the \`docker\` group; no containers deployed by default)
+$DOCKER_TOOLS_LINE
 - **Search tools**: ripgrep (rg), fd-find (fdfind), fzf
 - **Databases**: PostgreSQL client (psql), Redis client (redis-cli), SQLite3
 
 ## Permissions
 All tools are pre-approved — no permission prompts. Bash, Read, Write, Edit, WebFetch, WebSearch, Task, and MCP tools all run without confirmation.
 
-## Subagents & Agent Teams
-- **Subagents** (Task tool): quick, focused workers that report back. Define reusable ones as
-  Markdown files in ~/.claude/agents/ (see /agents).
-- **Agent teams** are ENABLED (CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1). Use these when teammates
-  need to share findings and coordinate, not just report back — e.g. "create a team to refactor X
-  with one teammate per layer." Each teammate is a full Claude Code instance with a shared task
-  list and messaging. They use significantly more tokens than a single session, so reserve them
-  for genuinely parallel, independent work. tmux is installed for split-pane visualization.
+## Subagents
+Define reusable ones as Markdown files in ~/.claude/agents/ (see /agents). tmux is installed for
+split-pane visualization if you're running several at once. Agent teams are an opt-in feature
+(CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 in ~/.claude/settings.json env) — not enabled by default
+by this setup; add it yourself if you want teammates that share findings and coordinate rather
+than just report back.
 
 ## Remote Control (drive this VM from Claude Desktop on Windows)
 Auto-start is configured (remoteControlAtStartup in ~/.claude.json), which corresponds to the
@@ -418,59 +508,33 @@ To connect from the Windows Claude Desktop app:
    needed on the VM or your router.
 4. The local \`claude\` process must keep running for the remote session to stay connected.
 
-## GitHub Access
-- **gh CLI** is installed; auth was configured via \`gh auth login\` during setup (re-run any time).
-- **SSH key**: ~/.ssh/id_ed25519(.pub) — add the public half at https://github.com/settings/keys
-  if it isn't already linked via \`gh\`. github.com's host key is pre-seeded in ~/.ssh/known_hosts.
-- Verify with: \`gh auth status\` and \`ssh -T git@github.com\`.
-- Clone with either \`gh repo clone owner/repo\` or standard \`git clone git@github.com:owner/repo.git\`.
-- **github plugin** (claude-plugins-official) adds /gh-issue, /gh-pr, /gh-actions, /gh-search for
-  working with issues, PRs, and Actions directly from Claude Code.
-
-## Docker Usage
-Docker and the Compose plugin are installed but no services are deployed by default. Log out and
-back in (or run \`newgrp docker\`) so group membership takes effect, then \`docker run hello-world\`
-to verify.
-
+$GITHUB_ACCESS_SECTION
+$DOCKER_USAGE_SECTION
 ## Conventions
 - Prefer creating files over printing long code blocks
 - Use git for version control on all projects in $HOME/project/
 - When installing Python packages, use: pip install --break-system-packages <package>
-- Extended thinking is always on — use it for complex architectural decisions
-
-## Installed Plugins
-Declared in ~/.claude/settings.json and installed from their marketplaces on first launch.
-Run /plugin to confirm they're active or add more.
-- **frontend-design** (claude-plugins-official): production-grade UI aesthetics
-- **code-review** (claude-plugins-official): multi-agent PR review with confidence scoring
-- **commit-commands** (claude-plugins-official): git commit/push/PR workflows (/commit, /push, /pr)
-- **security-guidance** (claude-plugins-official): warnings when editing sensitive files
-- **context7** (claude-plugins-official): live, version-specific library docs (reduces API hallucinations)
-- **docker** (claude-plugins-official): build images, manage containers/Compose, container networking
-- **github** (claude-plugins-official): issues, PRs, code review, repo search, Actions
-- **superpowers** (superpowers-marketplace): brainstorm → plan → implement (TDD) workflow
-  - /superpowers:brainstorm, /superpowers:write-plan, /superpowers:execute-plan
-  - Auto-activating skills: test-driven-development, systematic-debugging, verification-before-completion
-- **deployment-engineer** (awesome-claude-code-plugins, community): CI/CD pipelines, Docker,
-  cloud/Kubernetes deployment workflows
-
-## Installed Skills
-- **webapp-testing** (~/.claude/skills/): Playwright-based browser testing for UI verification
+$PLUGINS_SECTION
+$SKILLS_SECTION
 CLAUDEMD
 
-  CURRENT_STEP="Installing webapp-testing skill"
-  echo ">>> Installing webapp-testing skill (from anthropics/skills)..."
-  rm -rf /tmp/anthropic-skills
-  git clone --depth 1 --filter=blob:none --sparse https://github.com/anthropics/skills.git /tmp/anthropic-skills
-  (cd /tmp/anthropic-skills && git sparse-checkout set skills/webapp-testing)
-  mkdir -p "$HOME/.claude/skills/"
-  rm -rf "$HOME/.claude/skills/webapp-testing"
-  cp -r /tmp/anthropic-skills/skills/webapp-testing "$HOME/.claude/skills/webapp-testing"
-  rm -rf /tmp/anthropic-skills
+  if [[ "${INSTALL_WEBAPP_TESTING,,}" == y* ]]; then
+    CURRENT_STEP="Installing webapp-testing skill"
+    echo ">>> Installing webapp-testing skill (from anthropics/skills)..."
+    rm -rf /tmp/anthropic-skills
+    git clone --depth 1 --filter=blob:none --sparse https://github.com/anthropics/skills.git /tmp/anthropic-skills
+    (cd /tmp/anthropic-skills && git sparse-checkout set skills/webapp-testing)
+    mkdir -p "$HOME/.claude/skills/"
+    rm -rf "$HOME/.claude/skills/webapp-testing"
+    cp -r /tmp/anthropic-skills/skills/webapp-testing "$HOME/.claude/skills/webapp-testing"
+    rm -rf /tmp/anthropic-skills
 
-  CURRENT_STEP="Installing Playwright"
-  echo ">>> Installing Playwright for webapp-testing skill..."
-  npx -y playwright install --with-deps chromium
+    CURRENT_STEP="Installing Playwright"
+    echo ">>> Installing Playwright for webapp-testing skill..."
+    npx -y playwright install --with-deps chromium
+  else
+    info "Skipping webapp-testing skill + Playwright (declined)."
+  fi
 
   CURRENT_STEP="Setting up shell environment"
   echo ">>> Setting up shell environment (bash + zsh if present)..."
@@ -558,31 +622,46 @@ print_summary() {
   echo -e "  ${BOLD}Project dir:${NC} $HOME/project"
   echo ""
   echo -e "  ${BOLD}Next steps:${NC}"
-  echo -e "    1. Log out and back in (or run: ${CYAN}newgrp docker${NC}) so the docker group applies"
-  echo -e "    2. ${CYAN}source ~/.bashrc${NC} (or ~/.zshrc, or just open a new shell)"
-  echo -e "    3. ${CYAN}gh auth status${NC}  /  ${CYAN}ssh -T git@github.com${NC}  — confirm GitHub access"
-  echo -e "    4. ${CYAN}cd ~/project && claude${NC}, then ${CYAN}/login${NC} (Pro/Max required for Remote Control)"
-  echo -e "    5. On Windows Claude Desktop: Settings → Claude Code → enable remote control, then"
+  step=1
+  if [[ "${INSTALL_DOCKER,,}" == y* ]]; then
+    echo -e "    ${step}. Log out and back in (or run: ${CYAN}newgrp docker${NC}) so the docker group applies"; step=$((step+1))
+  fi
+  echo -e "    ${step}. ${CYAN}source ~/.bashrc${NC} (or ~/.zshrc, or just open a new shell)"; step=$((step+1))
+  if [[ "${SETUP_GITHUB,,}" == y* ]]; then
+    echo -e "    ${step}. ${CYAN}gh auth status${NC}  /  ${CYAN}ssh -T git@github.com${NC}  — confirm GitHub access"; step=$((step+1))
+  fi
+  echo -e "    ${step}. ${CYAN}cd ~/project && claude${NC}, then ${CYAN}/login${NC} (Pro/Max required for Remote Control)"; step=$((step+1))
+  echo -e "    ${step}. On Windows Claude Desktop: Settings → Claude Code → enable remote control, then"
   echo -e "       find this VM's session in the session list (or claude.ai/code) to drive it remotely"
   echo ""
   echo -e "  ${BOLD}Installed:${NC}"
-  echo "    • Claude Code (native)    • Node.js 22 LTS"
+  echo "    • Claude Code (apt)       • Node.js 22 LTS"
   echo "    • Python 3 + pip + venv   • Go (latest)"
-  echo "    • Rust (via rustup)       • Docker + Compose (no containers deployed)"
-  echo "    • Git + GitHub CLI (gh)   • Build essentials"
+  echo "    • Rust (via rustup)       • Build essentials"
   echo "    • ripgrep, fzf, fd        • PostgreSQL & Redis CLI"
+  [[ "${INSTALL_DOCKER,,}" == y* ]] && echo "    • Docker + Compose (no containers deployed)"
+  [[ "${SETUP_GITHUB,,}" == y* ]] && echo "    • Git + GitHub CLI (gh)"
   echo ""
   echo -e "  ${BOLD}Permissions:${NC}  All tools pre-approved (no prompts)"
   echo -e "  ${BOLD}Config:${NC}      ~/.claude/settings.json"
-  echo -e "  ${BOLD}Features:${NC}    Agent teams, extended thinking, 64k output, remote control, auto-approved tools"
-  echo -e "  ${BOLD}Plugins:${NC}     frontend-design, code-review, commit-commands, security-guidance,"
-  echo -e "               context7, docker, github, superpowers, deployment-engineer"
-  echo -e "               (run /plugin to verify)"
-  echo -e "  ${BOLD}Skills:${NC}      webapp-testing"
+  if [[ "${INSTALL_PLUGINS,,}" == y* ]]; then
+    plugin_list="frontend-design, code-review, commit-commands, security-guidance, context7, superpowers, deployment-engineer"
+    [[ "${INSTALL_DOCKER,,}" == y* ]] && plugin_list="${plugin_list}, docker"
+    [[ "${SETUP_GITHUB,,}" == y* ]] && plugin_list="${plugin_list}, github"
+    echo -e "  ${BOLD}Plugins:${NC}     ${plugin_list}"
+    echo -e "               (run /plugin to verify)"
+  else
+    echo -e "  ${BOLD}Plugins:${NC}     none (declined)"
+  fi
+  if [[ "${INSTALL_WEBAPP_TESTING,,}" == y* ]]; then
+    echo -e "  ${BOLD}Skills:${NC}      webapp-testing"
+  fi
   echo -e "  ${BOLD}Locale:${NC}      en_GB.UTF-8"
   echo -e "  ${BOLD}Auto-updates:${NC} System packages every Sunday 3 AM (local system time)"
-  echo -e "  ${BOLD}GitHub:${NC}      SSH key at ~/.ssh/id_ed25519.pub — add at github.com/settings/keys"
-  echo -e "               if 'gh auth login' didn't already link it"
+  if [[ "${SETUP_GITHUB,,}" == y* ]]; then
+    echo -e "  ${BOLD}GitHub:${NC}      SSH key at ~/.ssh/id_ed25519.pub — add at github.com/settings/keys"
+    echo -e "               if 'gh auth login' didn't already link it"
+  fi
   echo ""
 }
 
