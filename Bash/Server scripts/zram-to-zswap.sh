@@ -1,0 +1,367 @@
+#!/usr/bin/env bash
+# zram-to-zswap.sh — audit + migrate a host from zram-config to zswap, with backup/revert
+# Usage:
+#   ./zram-to-zswap.sh                    # dry run: shows the migration plan, changes nothing
+#   ./zram-to-zswap.sh --apply            # migrate: back up current state, then apply
+#   ./zram-to-zswap.sh --revert           # dry run: shows what a revert would do
+#   ./zram-to-zswap.sh --revert --apply   # revert: restore the most recent backup
+#
+# Tunables (override via env):
+#   ZSWAP_COMPRESSOR=zstd
+#   ZSWAP_POOL_PERCENT=20   # % of RAM zswap's pool can use — already scales with RAM
+#   SWAP_DIVISOR=4          # backing real swap size = totalmem / SWAP_DIVISOR
+#   SWAP_FLOOR_MB=512       # ...clamped to at least this...
+#   SWAP_CAP_MB=8192        # ...and at most this (the zswap pool absorbs the rest)
+#   NEW_SWAP_SIZE=          # set explicitly (e.g. 2G) to bypass the auto calculation
+#   BACKUP_ROOT=/var/backups/zram-to-zswap
+
+set -euo pipefail
+
+if [[ $EUID -ne 0 ]]; then
+  echo "This script must be run as root (sudo ./zram-to-zswap.sh ...)." >&2
+  exit 1
+fi
+
+MODE="migrate"
+APPLY=false
+for arg in "$@"; do
+  case "$arg" in
+    --apply) APPLY=true ;;
+    --revert) MODE="revert" ;;
+  esac
+done
+
+BACKUP_ROOT="${BACKUP_ROOT:-/var/backups/zram-to-zswap}"
+
+ZSWAP_COMPRESSOR="${ZSWAP_COMPRESSOR:-zstd}"
+ZSWAP_POOL_PERCENT="${ZSWAP_POOL_PERCENT:-20}"
+SWAP_DIVISOR="${SWAP_DIVISOR:-4}"
+SWAP_FLOOR_MB="${SWAP_FLOOR_MB:-512}"
+SWAP_CAP_MB="${SWAP_CAP_MB:-8192}"
+
+calc_swap_size_mb() {
+  local totalmem_mb swap_mb
+  totalmem_mb=$(awk '/MemTotal/{print int($2/1024)}' /proc/meminfo)
+  swap_mb=$(( totalmem_mb / SWAP_DIVISOR ))
+  if (( swap_mb < SWAP_FLOOR_MB )); then
+    swap_mb=$SWAP_FLOOR_MB
+  fi
+  if (( swap_mb > SWAP_CAP_MB )); then
+    swap_mb=$SWAP_CAP_MB
+  fi
+  echo "$swap_mb"
+}
+
+if [[ -z "${NEW_SWAP_SIZE:-}" ]]; then
+  NEW_SWAP_SIZE="$(calc_swap_size_mb)M"
+  AUTO_SIZED=true
+else
+  AUTO_SIZED=false
+fi
+
+hr() { echo; echo "== $* =="; }
+
+hr "Host identity"
+hostnamectl
+
+########################################################################
+# Revert mode
+########################################################################
+if [[ "$MODE" == "revert" ]]; then
+  TARGET="${BACKUP_ROOT}/latest"
+  if [[ ! -e "$TARGET" ]]; then
+    echo "No backup found at $TARGET — nothing to revert." >&2
+    exit 1
+  fi
+  BACKUP_DIR=$(readlink -f "$TARGET")
+  echo "Using backup: $BACKUP_DIR"
+
+  if [[ ! -f "$BACKUP_DIR/manifest.env" ]]; then
+    echo "manifest.env missing in $BACKUP_DIR — refusing to revert (backup incomplete, likely from an interrupted run)." >&2
+    exit 1
+  fi
+  # shellcheck disable=SC1091
+  source "$BACKUP_DIR/manifest.env"
+
+  hr "Revert plan"
+  echo "Disable zswap at runtime"
+  if [[ -f "$BACKUP_DIR/cmdline-path" ]]; then
+    echo "Restore $(cat "$BACKUP_DIR/cmdline-path") from backup and refresh the bootloader"
+  fi
+  echo "Restore /etc/fstab from backup"
+  if [[ -n "${SWAP_DEV:-}" ]]; then
+    echo "swapoff $SWAP_DEV"
+    if [[ "${SWAP_DEV_WAS_CREATED:-false}" == "true" ]]; then
+      echo "NOTE: $SWAP_DEV was created by the migration — it will be left in place, not destroyed."
+      echo "      Remove it manually afterwards if you don't want to keep it."
+    fi
+  fi
+  if [[ "${PKG_ZRAM_CONFIG_WAS_INSTALLED:-false}" == "true" ]]; then
+    echo "Reinstall zram-config, restore your original /usr/bin/init-zram-swapping, re-enable and start it"
+  fi
+
+  if ! $APPLY; then
+    echo
+    echo "Dry run complete — nothing was changed. Re-run with '--revert --apply' to make it real."
+    exit 0
+  fi
+
+  hr "Reverting"
+
+  if [[ -e /sys/module/zswap/parameters/enabled ]]; then
+    echo 0 > /sys/module/zswap/parameters/enabled
+  fi
+
+  if [[ -f "$BACKUP_DIR/cmdline-path" ]]; then
+    CMDLINE_FILE_RESTORE=$(cat "$BACKUP_DIR/cmdline-path")
+    cp -a "$BACKUP_DIR/cmdline.bak" "$CMDLINE_FILE_RESTORE"
+    if [[ "$CMDLINE_FILE_RESTORE" == "/etc/kernel/cmdline" ]]; then
+      proxmox-boot-tool refresh
+    else
+      update-grub
+    fi
+  fi
+
+  cp -a "$BACKUP_DIR/fstab.bak" /etc/fstab
+
+  if [[ -n "${SWAP_DEV:-}" ]]; then
+    swapoff "$SWAP_DEV" 2>/dev/null || true
+  fi
+
+  if [[ "${PKG_ZRAM_CONFIG_WAS_INSTALLED:-false}" == "true" ]]; then
+    dpkg -s zram-config >/dev/null 2>&1 || apt install -y zram-config
+    if [[ -f "$BACKUP_DIR/init-zram-swapping.bak" ]]; then
+      cp -a "$BACKUP_DIR/init-zram-swapping.bak" /usr/bin/init-zram-swapping
+      chmod +x /usr/bin/init-zram-swapping
+    fi
+    systemctl enable --now zram-config 2>/dev/null || /usr/bin/init-zram-swapping
+  fi
+
+  hr "Result"
+  swapon --show
+  free -h
+  echo
+  echo "Revert complete. Reboot to confirm the restored boot configuration persists."
+  exit 0
+fi
+
+########################################################################
+# Migrate mode
+########################################################################
+
+hr "Current swap / memory state"
+swapon --show
+free -h
+zramctl 2>/dev/null || true
+
+ROOT_FSTYPE=$(findmnt -no FSTYPE /)
+echo "Root filesystem: $ROOT_FSTYPE"
+
+if command -v proxmox-boot-tool >/dev/null 2>&1 && [[ -f /etc/kernel/cmdline ]]; then
+  CMDLINE_FILE="/etc/kernel/cmdline"
+  REFRESH_CMD="proxmox-boot-tool refresh"
+elif [[ -f /etc/default/grub ]]; then
+  CMDLINE_FILE="/etc/default/grub"
+  REFRESH_CMD="update-grub"
+else
+  CMDLINE_FILE=""
+fi
+
+TOTALMEM_MB=$(awk '/MemTotal/{print int($2/1024)}' /proc/meminfo)
+if $AUTO_SIZED; then
+  echo "Backing swap size: ${NEW_SWAP_SIZE} (auto: ${TOTALMEM_MB}MB / ${SWAP_DIVISOR}, floor ${SWAP_FLOOR_MB}MB, cap ${SWAP_CAP_MB}MB)"
+else
+  echo "Backing swap size: ${NEW_SWAP_SIZE} (explicit override)"
+fi
+
+ZRAM_DEVICES=$(swapon --show=NAME --noheadings | grep '^/dev/zram' || true)
+REAL_SWAP=$(swapon --show=NAME --noheadings | grep -v '^/dev/zram' || true)
+
+hr "Diagnosis"
+if [[ -n "$ZRAM_DEVICES" && -n "$REAL_SWAP" ]]; then
+  echo "zram AND real disk swap both active ($REAL_SWAP) — the combination"
+  echo "the article warns against (LRU inversion)."
+  echo "Plan: keep existing real swap, drop zram, enable zswap."
+elif [[ -n "$ZRAM_DEVICES" && -z "$REAL_SWAP" ]]; then
+  echo "Only zram active, no real backing swap."
+  echo "Plan: provision ${NEW_SWAP_SIZE} real swap, drop zram, enable zswap."
+elif [[ -z "$ZRAM_DEVICES" && -n "$REAL_SWAP" ]]; then
+  echo "Real swap already active ($REAL_SWAP), no zram in use."
+  echo "Plan: nothing to remove — just enable zswap in front of it."
+else
+  echo "No swap active at all."
+  echo "Plan: provision ${NEW_SWAP_SIZE} real swap, then enable zswap."
+fi
+
+if [[ -n "$ZRAM_DEVICES" ]]; then
+  ZRAM_DATA_KB=$(zramctl --noheadings --bytes -o DATA 2>/dev/null | awk '{s+=$1} END{print int(s/1024)}')
+  AVAIL_KB=$(awk '/MemAvailable/{print $2}' /proc/meminfo)
+  if [[ -n "$ZRAM_DATA_KB" && "$ZRAM_DATA_KB" -gt "$AVAIL_KB" ]]; then
+    echo "WARNING: zram holds more uncompressed data than available RAM."
+    echo "  swapoff needs to decompress it all back into RAM — this may thrash."
+  fi
+fi
+
+### Back up current state before touching anything ###
+if $APPLY; then
+  BACKUP_DIR="${BACKUP_ROOT}/$(date +%Y%m%d-%H%M%S)"
+  hr "Backing up current state to $BACKUP_DIR"
+  mkdir -p "$BACKUP_DIR"
+  cp -a /etc/fstab "$BACKUP_DIR/fstab.bak"
+  if [[ -n "$CMDLINE_FILE" ]]; then
+    cp -a "$CMDLINE_FILE" "$BACKUP_DIR/cmdline.bak"
+    echo "$CMDLINE_FILE" > "$BACKUP_DIR/cmdline-path"
+  fi
+  if [[ -e /usr/bin/init-zram-swapping ]]; then
+    cp -a /usr/bin/init-zram-swapping "$BACKUP_DIR/init-zram-swapping.bak"
+  fi
+  PKG_ZRAM_CONFIG_WAS_INSTALLED=$(dpkg -s zram-config >/dev/null 2>&1 && echo true || echo false)
+  ln -sfn "$BACKUP_DIR" "${BACKUP_ROOT}/latest"
+  echo "Backup saved (symlinked as ${BACKUP_ROOT}/latest). Revert with:"
+  echo "  sudo $0 --revert --apply"
+else
+  PKG_ZRAM_CONFIG_WAS_INSTALLED=""
+fi
+
+### Step 1: provision real swap if none exists ###
+if [[ -z "$REAL_SWAP" ]]; then
+  hr "Provisioning ${NEW_SWAP_SIZE} backing swap (root fs: $ROOT_FSTYPE)"
+
+  if [[ "$ROOT_FSTYPE" == "zfs" ]]; then
+    POOL=$(findmnt -no SOURCE / | cut -d/ -f1)
+    SWAP_DEV="/dev/zvol/${POOL}/swap"
+    echo "Detected ZFS pool: $POOL"
+    if zfs list -H -o name "${POOL}/swap" >/dev/null 2>&1; then
+      echo "zvol ${POOL}/swap already exists — reusing it, not recreating"
+      DEVICE_EXISTS=true
+    else
+      DEVICE_EXISTS=false
+    fi
+    if $APPLY && ! $DEVICE_EXISTS; then
+      zfs create -V "${NEW_SWAP_SIZE}" -b "$(getconf PAGESIZE)" \
+        -o compression=off -o primarycache=metadata -o sync=always "${POOL}/swap"
+      mkswap -f "$SWAP_DEV"
+    fi
+
+  elif command -v vgs >/dev/null 2>&1 && vgs --noheadings 2>/dev/null | grep -q .; then
+    VG=$(vgs --noheadings -o vg_name | awk 'NR==1{print $1}')
+    SWAP_DEV="/dev/${VG}/swap"
+    echo "Detected LVM volume group: $VG"
+    if lvs --noheadings "${VG}/swap" >/dev/null 2>&1; then
+      echo "LV ${VG}/swap already exists — reusing it, not recreating"
+      DEVICE_EXISTS=true
+    else
+      DEVICE_EXISTS=false
+    fi
+    if $APPLY && ! $DEVICE_EXISTS; then
+      lvcreate -L "${NEW_SWAP_SIZE}" -n swap "${VG}"
+      mkswap "$SWAP_DEV"
+    fi
+
+  else
+    SWAP_DEV="/swapfile"
+    echo "No ZFS root / LVM VG detected — falling back to a swapfile"
+    if [[ -e "$SWAP_DEV" ]]; then
+      echo "$SWAP_DEV already exists — reusing it, not recreating"
+      DEVICE_EXISTS=true
+    else
+      DEVICE_EXISTS=false
+    fi
+    if $APPLY && ! $DEVICE_EXISTS; then
+      fallocate -l "${NEW_SWAP_SIZE}" "$SWAP_DEV"
+      chmod 600 "$SWAP_DEV"
+      mkswap "$SWAP_DEV"
+    fi
+  fi
+
+  if $APPLY; then
+    grep -q "^${SWAP_DEV}" /etc/fstab || echo "${SWAP_DEV} none swap sw 0 0" >> /etc/fstab
+    swapon "$SWAP_DEV"
+  elif $DEVICE_EXISTS; then
+    echo "  [dry-run] would reuse existing ${SWAP_DEV}, ensure fstab entry, swapon"
+  else
+    echo "  [dry-run] would provision ${NEW_SWAP_SIZE} at ${SWAP_DEV}, mkswap, add to fstab, swapon"
+  fi
+fi
+
+### Step 2: remove zram-config ###
+if [[ -n "$ZRAM_DEVICES" ]]; then
+  hr "Removing zram-config"
+  if $APPLY; then
+    for dev in $ZRAM_DEVICES; do swapoff "$dev"; done
+    systemctl disable --now zram-config 2>/dev/null || true
+    apt purge -y zram-config
+    rm -f /usr/bin/init-zram-swapping
+  else
+    echo "  [dry-run] would swapoff $ZRAM_DEVICES, purge zram-config, remove init-zram-swapping"
+  fi
+fi
+
+### Step 3: enable zswap now (runtime) ###
+hr "Enabling zswap (runtime)"
+if [[ -e /sys/module/zswap/parameters/enabled ]]; then
+  if $APPLY; then
+    echo "${ZSWAP_COMPRESSOR}" > /sys/module/zswap/parameters/compressor
+    echo zsmalloc > /sys/module/zswap/parameters/zpool
+    echo "${ZSWAP_POOL_PERCENT}" > /sys/module/zswap/parameters/max_pool_percent
+    echo 1 > /sys/module/zswap/parameters/enabled
+  else
+    echo "  [dry-run] would set compressor=${ZSWAP_COMPRESSOR}, zpool=zsmalloc,"
+    echo "  max_pool_percent=${ZSWAP_POOL_PERCENT}, enabled=1"
+  fi
+else
+  echo "  /sys/module/zswap/parameters not found — needs the cmdline param + reboot first."
+fi
+
+### Step 4: persist across reboots via kernel cmdline ###
+hr "Persisting zswap via kernel cmdline"
+CMDLINE_PARAMS="zswap.enabled=1 zswap.compressor=${ZSWAP_COMPRESSOR} zswap.zpool=zsmalloc zswap.max_pool_percent=${ZSWAP_POOL_PERCENT}"
+
+if [[ -z "$CMDLINE_FILE" ]]; then
+  echo "  Could not detect proxmox-boot-tool or GRUB — set these manually:"
+  echo "  $CMDLINE_PARAMS"
+elif grep -q 'zswap.enabled' "$CMDLINE_FILE"; then
+  echo "  $CMDLINE_FILE already has zswap params, leaving as-is"
+elif $APPLY; then
+  if [[ "$CMDLINE_FILE" == "/etc/kernel/cmdline" ]]; then
+    sed -i "s/\$/ ${CMDLINE_PARAMS}/" "$CMDLINE_FILE"
+  else
+    sed -i "s/GRUB_CMDLINE_LINUX_DEFAULT=\"\(.*\)\"/GRUB_CMDLINE_LINUX_DEFAULT=\"\1 ${CMDLINE_PARAMS}\"/" "$CMDLINE_FILE"
+  fi
+  $REFRESH_CMD
+else
+  echo "  [dry-run] would append to $CMDLINE_FILE and run: $REFRESH_CMD"
+  echo "    $CMDLINE_PARAMS"
+fi
+
+### Save manifest for revert ###
+if $APPLY; then
+  SWAP_DEV_WAS_CREATED=false
+  [[ "${DEVICE_EXISTS:-true}" == "false" ]] && SWAP_DEV_WAS_CREATED=true
+  {
+    echo "ZRAM_DEVICES='${ZRAM_DEVICES}'"
+    echo "SWAP_DEV='${SWAP_DEV:-}'"
+    echo "SWAP_DEV_WAS_CREATED='${SWAP_DEV_WAS_CREATED}'"
+    echo "PKG_ZRAM_CONFIG_WAS_INSTALLED='${PKG_ZRAM_CONFIG_WAS_INSTALLED}'"
+  } > "$BACKUP_DIR/manifest.env"
+fi
+
+### Step 5: verify ###
+hr "Result"
+swapon --show
+free -h
+if [[ -e /sys/module/zswap/parameters/enabled ]]; then
+  echo "zswap enabled:          $(cat /sys/module/zswap/parameters/enabled)"
+  echo "zswap compressor:       $(cat /sys/module/zswap/parameters/compressor)"
+  echo "zswap max_pool_percent: $(cat /sys/module/zswap/parameters/max_pool_percent)"
+fi
+
+if $APPLY; then
+  echo
+  echo "Done. A reboot isn't required (zswap is already live) but is worth doing"
+  echo "once to confirm the setting survives it."
+  echo "To undo everything this run did: sudo $0 --revert --apply"
+else
+  echo
+  echo "Dry run complete — nothing was changed. Re-run with --apply to make it real."
+fi
