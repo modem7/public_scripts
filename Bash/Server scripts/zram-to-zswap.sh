@@ -61,6 +61,17 @@ fi
 
 hr() { echo; echo "== $* =="; }
 
+# $0 is meaningless when this is run as `curl ... | sudo bash -s -- --apply`
+# (no local file to point back to) — fall back to a re-fetch-and-run one-liner.
+SCRIPT_URL="https://raw.githubusercontent.com/modem7/public_scripts/master/Bash/Server%20scripts/zram-to-zswap.sh"
+revert_hint() {
+  if [[ -f "$0" && "$0" != "bash" && "$0" != "-bash" && "$0" != "sh" ]]; then
+    echo "sudo $0 --revert --apply"
+  else
+    echo "curl -s '$SCRIPT_URL' | sudo bash -s -- --revert --apply"
+  fi
+}
+
 hr "Host identity"
 hostnamectl
 
@@ -229,7 +240,7 @@ if $APPLY; then
   PKG_ZRAM_CONFIG_WAS_INSTALLED=$(dpkg -s zram-config >/dev/null 2>&1 && echo true || echo false)
   ln -sfn "$BACKUP_DIR" "${BACKUP_ROOT}/latest"
   echo "Backup saved (symlinked as ${BACKUP_ROOT}/latest). Revert with:"
-  echo "  sudo $0 --revert --apply"
+  echo "  $(revert_hint)"
 else
   PKG_ZRAM_CONFIG_WAS_INSTALLED=""
 fi
@@ -301,7 +312,12 @@ if [[ -n "$ZRAM_DEVICES" ]]; then
   if $APPLY; then
     for dev in $ZRAM_DEVICES; do swapoff "$dev"; done
     systemctl disable --now zram-config 2>/dev/null || true
-    apt purge -y zram-config
+    # apt's package index may not have zram-config (not in every distro's
+    # default repos, or the repo that provided it is no longer configured)
+    # even though it's genuinely installed — dpkg only needs local state.
+    if ! apt purge -y zram-config 2>/dev/null; then
+      dpkg --purge zram-config 2>/dev/null || echo "  WARNING: could not purge the zram-config package (may already be gone, or installed outside apt) — continuing anyway."
+    fi
     rm -f /usr/bin/init-zram-swapping
   else
     echo "  [dry-run] would swapoff $ZRAM_DEVICES, purge zram-config, remove init-zram-swapping"
@@ -312,10 +328,21 @@ fi
 hr "Enabling zswap (runtime)"
 if [[ -e /sys/module/zswap/parameters/enabled ]]; then
   if $APPLY; then
-    echo "${ZSWAP_COMPRESSOR}" > /sys/module/zswap/parameters/compressor
-    echo zsmalloc > /sys/module/zswap/parameters/zpool
-    echo "${ZSWAP_POOL_PERCENT}" > /sys/module/zswap/parameters/max_pool_percent
-    echo 1 > /sys/module/zswap/parameters/enabled
+    # Pre-load zsmalloc explicitly: writing zpool=zsmalloc can otherwise make
+    # the kernel request_module() it on demand, which kernel lockdown (common
+    # with Secure Boot enabled) blocks via sysfs even for root.
+    modprobe zsmalloc 2>/dev/null || true
+    RUNTIME_OK=true
+    echo "${ZSWAP_COMPRESSOR}" > /sys/module/zswap/parameters/compressor 2>/dev/null || RUNTIME_OK=false
+    echo zsmalloc > /sys/module/zswap/parameters/zpool 2>/dev/null || RUNTIME_OK=false
+    echo "${ZSWAP_POOL_PERCENT}" > /sys/module/zswap/parameters/max_pool_percent 2>/dev/null || RUNTIME_OK=false
+    echo 1 > /sys/module/zswap/parameters/enabled 2>/dev/null || RUNTIME_OK=false
+    if ! $RUNTIME_OK; then
+      echo "  WARNING: could not fully enable zswap at runtime (permission denied writing"
+      echo "  sysfs params — likely kernel lockdown/Secure Boot blocking dynamic module"
+      echo "  loading via sysfs). The kernel cmdline is still set below, so zswap will"
+      echo "  come up correctly after a reboot even though it isn't live yet."
+    fi
   else
     echo "  [dry-run] would set compressor=${ZSWAP_COMPRESSOR}, zpool=zsmalloc,"
     echo "  max_pool_percent=${ZSWAP_POOL_PERCENT}, enabled=1"
@@ -371,7 +398,7 @@ if $APPLY; then
   echo
   echo "Done. A reboot isn't required (zswap is already live) but is worth doing"
   echo "once to confirm the setting survives it."
-  echo "To undo everything this run did: sudo $0 --revert --apply"
+  echo "To undo everything this run did: $(revert_hint)"
 else
   echo
   echo "Dry run complete — nothing was changed. Re-run with --apply to make it real."
