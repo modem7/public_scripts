@@ -338,10 +338,11 @@ if [[ -e /sys/module/zswap/parameters/enabled ]]; then
     echo "${ZSWAP_POOL_PERCENT}" > /sys/module/zswap/parameters/max_pool_percent 2>/dev/null || RUNTIME_OK=false
     echo 1 > /sys/module/zswap/parameters/enabled 2>/dev/null || RUNTIME_OK=false
     if ! $RUNTIME_OK; then
-      echo "  WARNING: could not fully enable zswap at runtime (permission denied writing"
-      echo "  sysfs params — likely kernel lockdown/Secure Boot blocking dynamic module"
-      echo "  loading via sysfs). The kernel cmdline is still set below, so zswap will"
-      echo "  come up correctly after a reboot even though it isn't live yet."
+      echo "  WARNING: one or more zswap sysfs writes were denied (kernel lockdown /"
+      echo "  Secure Boot commonly blocks dynamic module loading via sysfs, even as root)."
+      echo "  Some settings may still have applied — actual live state is checked in the"
+      echo "  Result section below. The kernel cmdline is set regardless, so a reboot"
+      echo "  will apply the full configuration either way."
     fi
   else
     echo "  [dry-run] would set compressor=${ZSWAP_COMPRESSOR}, zpool=zsmalloc,"
@@ -389,15 +390,34 @@ hr "Result"
 swapon --show
 free -h
 if [[ -e /sys/module/zswap/parameters/enabled ]]; then
-  echo "zswap enabled:          $(cat /sys/module/zswap/parameters/enabled)"
-  echo "zswap compressor:       $(cat /sys/module/zswap/parameters/compressor)"
-  echo "zswap max_pool_percent: $(cat /sys/module/zswap/parameters/max_pool_percent)"
+  ZSWAP_ENABLED_NOW=$(cat /sys/module/zswap/parameters/enabled)
+  ZSWAP_COMPRESSOR_NOW=$(cat /sys/module/zswap/parameters/compressor)
+  ZSWAP_ZPOOL_NOW=$(cat /sys/module/zswap/parameters/zpool)
+  ZSWAP_POOL_PERCENT_NOW=$(cat /sys/module/zswap/parameters/max_pool_percent)
+  echo "zswap enabled:          ${ZSWAP_ENABLED_NOW}"
+  echo "zswap compressor:       ${ZSWAP_COMPRESSOR_NOW}"
+  echo "zswap zpool:            ${ZSWAP_ZPOOL_NOW}"
+  echo "zswap max_pool_percent: ${ZSWAP_POOL_PERCENT_NOW}"
 fi
 
 if $APPLY; then
   echo
-  echo "Done. A reboot isn't required (zswap is already live) but is worth doing"
-  echo "once to confirm the setting survives it."
+  # Judge success from what's actually live now, not from whether every sysfs
+  # write in Step 3 succeeded — enabled=1 can succeed even if zpool didn't.
+  if [[ "${ZSWAP_ENABLED_NOW:-N}" == "Y" && "${ZSWAP_COMPRESSOR_NOW:-}" == "$ZSWAP_COMPRESSOR" \
+        && "${ZSWAP_ZPOOL_NOW:-}" == "zsmalloc" && "${ZSWAP_POOL_PERCENT_NOW:-}" == "$ZSWAP_POOL_PERCENT" ]]; then
+    echo "Done. zswap is fully live and configured as requested — no reboot required,"
+    echo "though one is worth doing once to confirm the setting survives it."
+  elif [[ "${ZSWAP_ENABLED_NOW:-N}" == "Y" ]]; then
+    echo "Done, with a caveat: zswap is live but not fully configured as requested"
+    echo "(compare the values above to compressor=${ZSWAP_COMPRESSOR}, zpool=zsmalloc,"
+    echo "max_pool_percent=${ZSWAP_POOL_PERCENT} — see the WARNING above for which"
+    echo "write(s) were denied). The kernel cmdline is set correctly, so a reboot"
+    echo "will bring it up fully configured."
+  else
+    echo "Done, but zswap could not be enabled at runtime at all (see WARNING above)."
+    echo "The kernel cmdline is set correctly, so it will come up after a reboot."
+  fi
   echo "To undo everything this run did: $(revert_hint)"
 else
   echo
