@@ -332,11 +332,15 @@ if [[ -e /sys/module/zswap/parameters/enabled ]]; then
     # the kernel request_module() it on demand, which kernel lockdown (common
     # with Secure Boot enabled) blocks via sysfs even for root.
     modprobe zsmalloc 2>/dev/null || true
+    # Each write is grouped in braces so the 2>/dev/null takes effect before
+    # the redirection into the sysfs file is attempted — bash prints its own
+    # "Permission denied" diagnostic for a failed target-file open *before*
+    # a same-line 2>/dev/null on the command would otherwise suppress it.
     RUNTIME_OK=true
-    echo "${ZSWAP_COMPRESSOR}" > /sys/module/zswap/parameters/compressor 2>/dev/null || RUNTIME_OK=false
-    echo zsmalloc > /sys/module/zswap/parameters/zpool 2>/dev/null || RUNTIME_OK=false
-    echo "${ZSWAP_POOL_PERCENT}" > /sys/module/zswap/parameters/max_pool_percent 2>/dev/null || RUNTIME_OK=false
-    echo 1 > /sys/module/zswap/parameters/enabled 2>/dev/null || RUNTIME_OK=false
+    { echo "${ZSWAP_COMPRESSOR}" > /sys/module/zswap/parameters/compressor; } 2>/dev/null || RUNTIME_OK=false
+    { echo zsmalloc > /sys/module/zswap/parameters/zpool; } 2>/dev/null || RUNTIME_OK=false
+    { echo "${ZSWAP_POOL_PERCENT}" > /sys/module/zswap/parameters/max_pool_percent; } 2>/dev/null || RUNTIME_OK=false
+    { echo 1 > /sys/module/zswap/parameters/enabled; } 2>/dev/null || RUNTIME_OK=false
     if ! $RUNTIME_OK; then
       echo "  WARNING: one or more zswap sysfs writes were denied (kernel lockdown /"
       echo "  Secure Boot commonly blocks dynamic module loading via sysfs, even as root)."
@@ -390,10 +394,14 @@ hr "Result"
 swapon --show
 free -h
 if [[ -e /sys/module/zswap/parameters/enabled ]]; then
-  ZSWAP_ENABLED_NOW=$(cat /sys/module/zswap/parameters/enabled)
-  ZSWAP_COMPRESSOR_NOW=$(cat /sys/module/zswap/parameters/compressor)
-  ZSWAP_ZPOOL_NOW=$(cat /sys/module/zswap/parameters/zpool)
-  ZSWAP_POOL_PERCENT_NOW=$(cat /sys/module/zswap/parameters/max_pool_percent)
+  # Individual parameter files can go missing even when .../enabled exists —
+  # seen in the wild where a denied zpool write left that one file gone by
+  # the time we get here. Check each before reading rather than assuming.
+  read_zswap_param() { [[ -e "/sys/module/zswap/parameters/$1" ]] && cat "/sys/module/zswap/parameters/$1" || echo "(not present)"; }
+  ZSWAP_ENABLED_NOW=$(read_zswap_param enabled)
+  ZSWAP_COMPRESSOR_NOW=$(read_zswap_param compressor)
+  ZSWAP_ZPOOL_NOW=$(read_zswap_param zpool)
+  ZSWAP_POOL_PERCENT_NOW=$(read_zswap_param max_pool_percent)
   echo "zswap enabled:          ${ZSWAP_ENABLED_NOW}"
   echo "zswap compressor:       ${ZSWAP_COMPRESSOR_NOW}"
   echo "zswap zpool:            ${ZSWAP_ZPOOL_NOW}"
