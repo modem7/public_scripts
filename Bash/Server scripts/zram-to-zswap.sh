@@ -328,9 +328,8 @@ fi
 hr "Enabling zswap (runtime)"
 if [[ -e /sys/module/zswap/parameters/enabled ]]; then
   if $APPLY; then
-    # Pre-load zsmalloc explicitly: writing zpool=zsmalloc can otherwise make
-    # the kernel request_module() it on demand, which kernel lockdown (common
-    # with Secure Boot enabled) blocks via sysfs even for root.
+    # Pre-load zsmalloc in case it's needed on-demand; harmless no-op if it's
+    # already built in (which is common — see the zpool note below).
     modprobe zsmalloc 2>/dev/null || true
     # Each write is grouped in braces so the 2>/dev/null takes effect before
     # the redirection into the sysfs file is attempted — bash prints its own
@@ -338,12 +337,18 @@ if [[ -e /sys/module/zswap/parameters/enabled ]]; then
     # a same-line 2>/dev/null on the command would otherwise suppress it.
     RUNTIME_OK=true
     { echo "${ZSWAP_COMPRESSOR}" > /sys/module/zswap/parameters/compressor; } 2>/dev/null || RUNTIME_OK=false
-    { echo zsmalloc > /sys/module/zswap/parameters/zpool; } 2>/dev/null || RUNTIME_OK=false
+    # Some kernels don't expose a zpool selector at all — when only zsmalloc
+    # is compiled in, there's nothing to choose between, so the sysfs
+    # attribute simply isn't registered. That's not a failure; skip it.
+    if [[ -e /sys/module/zswap/parameters/zpool ]]; then
+      { echo zsmalloc > /sys/module/zswap/parameters/zpool; } 2>/dev/null || RUNTIME_OK=false
+    fi
     { echo "${ZSWAP_POOL_PERCENT}" > /sys/module/zswap/parameters/max_pool_percent; } 2>/dev/null || RUNTIME_OK=false
     { echo 1 > /sys/module/zswap/parameters/enabled; } 2>/dev/null || RUNTIME_OK=false
     if ! $RUNTIME_OK; then
-      echo "  WARNING: one or more zswap sysfs writes were denied (kernel lockdown /"
-      echo "  Secure Boot commonly blocks dynamic module loading via sysfs, even as root)."
+      echo "  WARNING: one or more zswap sysfs writes were rejected by the kernel (seen in"
+      echo "  the wild both from kernel lockdown blocking sysfs-triggered module loading,"
+      echo "  and from writing a parameter the running kernel doesn't actually expose)."
       echo "  Some settings may still have applied — actual live state is checked in the"
       echo "  Result section below. The kernel cmdline is set regardless, so a reboot"
       echo "  will apply the full configuration either way."
@@ -404,24 +409,31 @@ if [[ -e /sys/module/zswap/parameters/enabled ]]; then
   ZSWAP_POOL_PERCENT_NOW=$(read_zswap_param max_pool_percent)
   echo "zswap enabled:          ${ZSWAP_ENABLED_NOW}"
   echo "zswap compressor:       ${ZSWAP_COMPRESSOR_NOW}"
-  echo "zswap zpool:            ${ZSWAP_ZPOOL_NOW}"
+  if [[ "$ZSWAP_ZPOOL_NOW" == "(not present)" ]]; then
+    echo "zswap zpool:            (not present — this kernel likely only compiles in one pool backend, so there's nothing to select)"
+  else
+    echo "zswap zpool:            ${ZSWAP_ZPOOL_NOW}"
+  fi
   echo "zswap max_pool_percent: ${ZSWAP_POOL_PERCENT_NOW}"
 fi
 
 if $APPLY; then
   echo
+  # A missing zpool file means this kernel doesn't expose the knob at all
+  # (nothing to select), not a misconfiguration — treat that as satisfied.
+  ZPOOL_OK=false
+  [[ "${ZSWAP_ZPOOL_NOW:-}" == "zsmalloc" || "${ZSWAP_ZPOOL_NOW:-}" == "(not present)" ]] && ZPOOL_OK=true
   # Judge success from what's actually live now, not from whether every sysfs
   # write in Step 3 succeeded — enabled=1 can succeed even if zpool didn't.
   if [[ "${ZSWAP_ENABLED_NOW:-N}" == "Y" && "${ZSWAP_COMPRESSOR_NOW:-}" == "$ZSWAP_COMPRESSOR" \
-        && "${ZSWAP_ZPOOL_NOW:-}" == "zsmalloc" && "${ZSWAP_POOL_PERCENT_NOW:-}" == "$ZSWAP_POOL_PERCENT" ]]; then
+        && "$ZPOOL_OK" == "true" && "${ZSWAP_POOL_PERCENT_NOW:-}" == "$ZSWAP_POOL_PERCENT" ]]; then
     echo "Done. zswap is fully live and configured as requested — no reboot required,"
     echo "though one is worth doing once to confirm the setting survives it."
   elif [[ "${ZSWAP_ENABLED_NOW:-N}" == "Y" ]]; then
     echo "Done, with a caveat: zswap is live but not fully configured as requested"
-    echo "(compare the values above to compressor=${ZSWAP_COMPRESSOR}, zpool=zsmalloc,"
-    echo "max_pool_percent=${ZSWAP_POOL_PERCENT} — see the WARNING above for which"
-    echo "write(s) were denied). The kernel cmdline is set correctly, so a reboot"
-    echo "will bring it up fully configured."
+    echo "(compare the values above to compressor=${ZSWAP_COMPRESSOR}, max_pool_percent=${ZSWAP_POOL_PERCENT}"
+    echo "— see the WARNING above for which write(s) were denied). The kernel cmdline is"
+    echo "set correctly, so a reboot will bring it up fully configured."
   else
     echo "Done, but zswap could not be enabled at runtime at all (see WARNING above)."
     echo "The kernel cmdline is set correctly, so it will come up after a reboot."
