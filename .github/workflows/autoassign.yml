@@ -19,7 +19,7 @@ jobs:
             assignees: modem7
 
   auto-assign-pr:
-    if: github.event_name == 'pull_request'
+    if: github.event_name == 'pull_request' && github.actor != 'renovate[bot]'
     runs-on: ubuntu-latest
     permissions:
       pull-requests: write
