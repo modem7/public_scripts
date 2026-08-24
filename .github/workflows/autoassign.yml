@@ -5,6 +5,8 @@ on:
     types: [opened]
   pull_request:
     types: [opened]
+  schedule:
+    - cron: '0 */6 * * *'
 
 jobs:
   auto-assign-issue:
@@ -29,3 +31,20 @@ jobs:
           uses: pozil/auto-assign-issue@v4.0.1
           with:
             assignees: modem7
+
+  auto-assign-stale-renovate-pr:
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+    steps:
+      - name: 'Assign Renovate PRs still open after automerge would have kicked in'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh pr list --repo "$GITHUB_REPOSITORY" --author "renovate[bot]" --state open \
+            --json number,assignees --jq '.[] | select(.assignees | length == 0) | .number' |
+          while read -r pr; do
+            echo "Assigning modem7 to PR #$pr"
+            gh pr edit "$pr" --repo "$GITHUB_REPOSITORY" --add-assignee modem7
+          done
