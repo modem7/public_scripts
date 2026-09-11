@@ -67,9 +67,10 @@ AGENT_ENABLE="1"
 FSTRIM="1"
 
 # CPU type
-# "host" passes through the host CPU directly: best performance and the
-# right choice for most homelabs where all nodes share the same CPU generation.
-# Change to "kvm64" if you need live migration across nodes with different CPUs.
+# - "host": passes the host CPU straight through. Best performance, right
+#   choice for most homelabs where every node is the same CPU generation.
+# - "kvm64": switch to this if you need live migration across nodes with
+#   different CPUs.
 CPU_TYPE="host"
 
 # Storage
@@ -81,10 +82,10 @@ EXTRA_VIRT_PKGS=""
 
 # SSH public key injected into the template via cloud-init.
 #
-# WARNING: Do NOT paste your SSH public key here as a hardcoded default.
-# Anyone who clones or copies this script inherits your key and gains SSH
-# access to every VM built from this template. Leave this empty: the script
-# will prompt you at runtime and save the key in your named .conf profile.
+# WARNING: do NOT hardcode your key here as a default.
+# Anyone who clones or copies this script inherits your key, and SSH access
+# to every VM built from it. Leave this blank, the script prompts you at
+# runtime and saves the key in your named .conf profile instead.
 SSH_KEY=""
 
 # VM tags
@@ -631,17 +632,18 @@ get_valid_vmid() {
 # =============================================================================
 # SSH key selection helper
 # =============================================================================
-# Offers four methods:
+# Five ways to provide a key:
 #   1. Paste a public key directly
-#   2. Provide a path to a .pub file
+#   2. Give a path to a .pub file
 #   3. Pick from keys found in ~/.ssh/ on this Proxmox host
 #   4. Fetch from GitHub by username
 #   5. Skip (no SSH key)
-# If a key was loaded from a config file, user can keep, replace, or clear it.
+# If a key was already loaded from a config file, the user can keep it,
+# replace it, or clear it instead.
 #
-# Note: GitHub strips comments server-side: keys fetched from github.com/<user>.keys
-# arrive without a comment field regardless of how they were uploaded. All methods
-# therefore prompt for a comment if one is not already present.
+# Note: GitHub strips comments server-side. Keys fetched from
+# github.com/<user>.keys arrive with no comment field, no matter how they
+# were uploaded. Every method above prompts for a comment if one is missing.
 # =============================================================================
 
 # Checks whether a key string has a comment (3rd field). If not, prompts the
@@ -782,22 +784,23 @@ _prompt_ssh_key() {
 # =============================================================================
 # cloud-init snippets / user-data (optional)
 # =============================================================================
-# Proxmox can attach a user-data YAML snippet to a VM so cloud-init applies
-# it on first boot of every clone. This is optional: if the chosen storage
-# has a 'snippets' content type, we offer to create a minimal user-data file.
+# Proxmox can attach a user-data YAML snippet to a VM, so cloud-init applies
+# it on first boot of every clone.
 #
-# The snippet enables password auth (off by default in Ubuntu cloud images)
-# and configures a few sensible first-boot defaults. Users can edit it freely
-# before cloning.
+# Optional. If the chosen storage supports the 'snippets' content type, we
+# offer to create a minimal user-data file that:
+#   - turns on password auth (off by default in Ubuntu cloud images)
+#   - sets a few sensible first-boot defaults
+# Users are free to edit it before cloning.
 # =============================================================================
 SNIPPETS_ENABLED="no"
 SNIPPETS_STOR=""
 SNIPPETS_FILE=""
 
 _prompt_snippets() {
-    # In unattended mode: only proceed if SNIPPETS_STOR is already set in config.
-    # Skip the search entirely if not: the user made that choice when they built
-    # the profile.
+    # Unattended mode: only proceed if SNIPPETS_STOR is already in the config.
+    # If not, skip the search entirely, that was the user's call when they
+    # built the profile.
     if [[ "$UNATTENDED" == "yes" ]]; then
         if [[ -n "${SNIPPETS_STOR:-}" ]]; then
             info "Unattended mode: using snippet storage from config: $SNIPPETS_STOR"
@@ -1042,9 +1045,9 @@ user_prompts() {
 # =============================================================================
 # Image download with SHA256 verification
 # =============================================================================
-# Strategy: keep a pristine untouched copy of the downloaded image alongside
-# the working copy. virt-customize operates on the working copy only, so the
-# pristine copy's checksum remains valid for upstream comparison on future runs.
+# Strategy: keep a pristine, untouched copy of the downloaded image alongside
+# the working copy. virt-customize only touches the working copy, so the
+# pristine copy's checksum stays valid for comparing against upstream later.
 #
 # Flow:
 #   1. No pristine copy exists → download, verify SHA256, save as pristine,
@@ -1331,9 +1334,9 @@ resize_disk() {
 # =============================================================================
 # Convert to template (optional)
 # =============================================================================
-# Behaviour priority:
-#   1. --convert-to-template / --no-convert-to-template CLI flag
-#   2. CONVERT_TO_TEMPLATE value from loaded config file
+# Priority order:
+#   1. --template / --no-template CLI flag
+#   2. CONVERT_TO_TEMPLATE value from a loaded config file
 #   3. Interactive prompt (default: no, to encourage customisation first)
 # =============================================================================
 maybe_convert_to_template() {
@@ -1499,10 +1502,10 @@ CLOUD_USER_DEFAULT="${CLOUD_USER}"
 # CLOUD_PASSWORD_DEFAULT is intentionally not saved for security.
 
 # SSH key
-# Unlike the script defaults, it IS safe to store your key here: this .conf
-# file is personal to you and not part of the shared script. It will not be
-# committed to any repo unless you explicitly add it.
-# This can be a full public key string, or a GitHub URL (github.com/<username>).
+# Unlike the script defaults, it IS safe to store your key here. This .conf
+# file is personal to you, not part of the shared script, and won't get
+# committed to any repo unless you add it yourself.
+# Can be a full public key string, or a GitHub URL (github.com/<username>).
 SSH_KEY="${SSH_KEY:-}"
 
 # Packages
