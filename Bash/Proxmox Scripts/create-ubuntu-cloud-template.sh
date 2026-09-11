@@ -11,31 +11,31 @@
 # Run with --help to see all available options and examples.
 #
 # Quick start:
-#   First run  — answer the prompts; save a named profile at the end.
-#   Repeat run — ./create-ubuntu-cloud-template.sh --config <profile>.conf
-#   Automated  — ./create-ubuntu-cloud-template.sh --config <profile>.conf \
+#   First run:  answer the prompts, save a named profile at the end.
+#   Repeat run: ./create-ubuntu-cloud-template.sh --config <profile>.conf
+#   Automated:  ./create-ubuntu-cloud-template.sh --config <profile>.conf \
 #                  --unattended --vmid <id> [--template] [--force-overwrite \
 #                  --i-know-what-i-am-doing]
 #
 # VM ID selection:
-#   --auto-vmid alone        — finds the next free ID from 100 upwards.
-#   --vmid <id> --auto-vmid  — tries <id> first; if taken, increments from
-#                              there. Use this to control which range your
+#   --auto-vmid alone:        finds the next free ID from 100 upwards.
+#   --vmid <id> --auto-vmid:  tries <id> first, then increments from there
+#                              if taken. Use this to control which range your
 #                              templates live in (e.g. --vmid 52000 --auto-vmid
 #                              keeps templates in the 52000+ range).
-#   --vmid <id> alone        — uses exactly <id>; fails if already taken.
+#   --vmid <id> alone:        uses exactly <id>, fails if already taken.
 # =============================================================================
 
 set -euo pipefail
 
 # =============================================================================
-# Script location — config files are stored alongside the script
+# Script location: config files are stored alongside the script
 # =============================================================================
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPT_NAME="$(basename "${BASH_SOURCE[0]}")"
 
 # =============================================================================
-# Defaults — overridden by config file or interactive prompts
+# Defaults: overridden by config file or interactive prompts
 # =============================================================================
 WORK_DIR="/tmp"
 PROFILE_NAME=""
@@ -67,7 +67,7 @@ AGENT_ENABLE="1"
 FSTRIM="1"
 
 # CPU type
-# "host" passes through the host CPU directly — best performance and the
+# "host" passes through the host CPU directly: best performance and the
 # right choice for most homelabs where all nodes share the same CPU generation.
 # Change to "kvm64" if you need live migration across nodes with different CPUs.
 CPU_TYPE="host"
@@ -83,7 +83,7 @@ EXTRA_VIRT_PKGS=""
 #
 # WARNING: Do NOT paste your SSH public key here as a hardcoded default.
 # Anyone who clones or copies this script inherits your key and gains SSH
-# access to every VM built from this template. Leave this empty — the script
+# access to every VM built from this template. Leave this empty: the script
 # will prompt you at runtime and save the key in your named .conf profile.
 SSH_KEY=""
 
@@ -123,7 +123,7 @@ AUTO_VMID="no"           # "yes" = auto-increment VMID on conflict instead of dy
 FORCE_OVERWRITE="no"     # "yes" = destroy existing template VM and replace it
 I_KNOW="no"              # "yes" = skip overwrite countdown in unattended mode
 
-# CLI flags that must survive config sourcing — stored separately and applied after
+# CLI flags that must survive config sourcing: stored separately and applied after
 _CLI_CONVERT_TO_TEMPLATE=""
 _CLI_TEMPL_NAME=""
 
@@ -188,7 +188,7 @@ while [[ $# -gt 0 ]]; do
             echo "                               Snippet search is skipped unless SNIPPETS_STOR is"
             echo "                               already set in the config file."
             echo "  --force-overwrite            Destroy an existing Proxmox template with the same"
-            echo "                               VM ID and replace it. CLI-only flag — cannot be set"
+            echo "                               VM ID and replace it. CLI-only flag: cannot be set"
             echo "                               in a config file. Only works on templates (template: 1);"
             echo "                               refuses to destroy running or non-template VMs."
             echo "  --i-know-what-i-am-doing     Skip the overwrite countdown/confirmation when"
@@ -207,7 +207,7 @@ while [[ $# -gt 0 ]]; do
             echo "  ./$SCRIPT_NAME --config noble-webserver.conf --auto-vmid"
             echo "    (next free ID from 100)"
             echo "  ./$SCRIPT_NAME --config noble-webserver.conf --vmid 52000 --auto-vmid"
-            echo "    (next free ID from 52000 — keeps templates in your chosen range)"
+            echo "    (next free ID from 52000: keeps templates in your chosen range)"
             echo "  ./$SCRIPT_NAME --config noble-webserver.conf --vmid 52001 --force-overwrite"
             echo "  ./$SCRIPT_NAME --config noble-webserver.conf --unattended --vmid 52000 --auto-vmid --template"
             echo "  ./$SCRIPT_NAME --config noble-webserver.conf --unattended --vmid 52001 --name ubuntu-noble-webserver --force-overwrite --i-know-what-i-am-doing --template"
@@ -249,13 +249,13 @@ if [[ "$AUTO_VMID" == "yes" && "$FORCE_OVERWRITE" == "yes" ]]; then
     die "--auto-vmid and --force-overwrite are mutually exclusive. Choose one conflict resolution strategy."
 fi
 
-# Apply CLI flag overrides — these must win over anything in the config file
+# Apply CLI flag overrides: these must win over anything in the config file
 CONVERT_TO_TEMPLATE="${_CLI_CONVERT_TO_TEMPLATE:-${CONVERT_TO_TEMPLATE:-}}"
 [[ -n "$_CLI_TEMPL_NAME" ]] && TEMPL_NAME="$_CLI_TEMPL_NAME"
 [[ -n "$VMID_FLAG"       ]] && VMID="$VMID_FLAG"
 
 # =============================================================================
-# Traps — CTRL+C and unexpected errors
+# Traps: CTRL+C and unexpected errors
 # =============================================================================
 # VMID_CREATED tracks whether qm create has run so the error handler knows
 # whether there is a VM to clean up.
@@ -320,7 +320,7 @@ install_packages() {
 
     warn "Missing packages: ${missing[*]}"
     if [[ "$UNATTENDED" == "yes" ]]; then
-        info "Unattended mode — installing automatically."
+        info "Unattended mode: installing automatically."
     else
         read -rp "Install them now? (Y/n): " choice
         choice="${choice:-Y}"
@@ -332,7 +332,7 @@ install_packages() {
 }
 
 # =============================================================================
-# Ubuntu version selection — fetched dynamically from cloud-images.ubuntu.com
+# Ubuntu version selection: fetched dynamically from cloud-images.ubuntu.com
 # =============================================================================
 select_ubuntu_version() {
     header "Ubuntu Version Selection"
@@ -431,7 +431,7 @@ select_storage() {
         local stored_type
         stored_type=$(pvesm status | awk -v s="$DISK_STOR" '$1==s {print $2}')
         if [[ -z "$stored_type" ]]; then
-            warn "Configured storage '$DISK_STOR' not found or inactive — falling back to selection."
+            warn "Configured storage '$DISK_STOR' not found or inactive: falling back to selection."
             DISK_STOR=""
         else
             _resolve_storage_type "$stored_type"
@@ -523,7 +523,7 @@ next_free_vmid() {
     echo "$id"
 }
 
-# Destroy an existing template VM — called only when --force-overwrite is set
+# Destroy an existing template VM: called only when --force-overwrite is set
 # and all safety checks have passed.
 destroy_existing_template() {
     local id="$1"
@@ -554,7 +554,7 @@ destroy_existing_template() {
         if [[ "$confirm" != "$name" ]]; then
             die "Name did not match. Aborting overwrite."
         fi
-        warn "Destroying VM $id in 5 seconds — press Ctrl+C to abort."
+        warn "Destroying VM $id in 5 seconds: press Ctrl+C to abort."
         for i in 5 4 3 2 1; do
             printf "\r  Destroying in %s... " "$i"
             sleep 1
@@ -610,7 +610,7 @@ get_valid_vmid() {
             return
         fi
 
-        # Unattended with no resolution strategy — die clearly
+        # Unattended with no resolution strategy: die clearly
         if [[ "$UNATTENDED" == "yes" ]]; then
             die "VM ID $VMID already exists. Re-run with one of:
   --vmid <id>          to specify a different ID
@@ -618,7 +618,7 @@ get_valid_vmid() {
   --force-overwrite    to destroy the existing template and replace it (templates only)"
         fi
 
-        # Interactive — keep prompting
+        # Interactive: keep prompting
         while vmid_exists "$VMID"; do
             warn "VM ID $VMID already exists."
             read -rp "Enter a different VM ID: " VMID
@@ -639,7 +639,7 @@ get_valid_vmid() {
 #   5. Skip (no SSH key)
 # If a key was loaded from a config file, user can keep, replace, or clear it.
 #
-# Note: GitHub strips comments server-side — keys fetched from github.com/<user>.keys
+# Note: GitHub strips comments server-side: keys fetched from github.com/<user>.keys
 # arrive without a comment field regardless of how they were uploaded. All methods
 # therefore prompt for a comment if one is not already present.
 # =============================================================================
@@ -654,11 +654,11 @@ _ensure_key_comment() {
         echo "$key"
         return
     fi
-    # Redirect UI to stderr — this function is called inside $() so stdout
+    # Redirect UI to stderr: this function is called inside $() so stdout
     # is captured into SSH_KEY; any echo to stdout other than the key itself
     # would corrupt the value.
     echo "" >&2
-    info "This key has no comment — Proxmox will show it as blank in the UI." >&2
+    info "This key has no comment: Proxmox will show it as blank in the UI." >&2
     read -rp "  Add a comment (e.g. hostname or key purpose, leave blank to skip): " comment
     if [[ -n "$comment" ]]; then
         echo "$key $comment"
@@ -696,7 +696,7 @@ _prompt_ssh_key() {
     echo "  2) Enter a path to a .pub file"
     echo "  3) Choose from keys in ~/.ssh/ on this host"
     echo "  4) Fetch from GitHub (by username)"
-    echo "  5) Skip — no SSH key"
+    echo "  5) Skip: no SSH key"
     echo ""
     read -rp "Choice [1]: " method
     method="${method:-1}"
@@ -716,7 +716,7 @@ _prompt_ssh_key() {
             read -rp "Path to .pub file: " pub_path
             pub_path="${pub_path/#\~/$HOME}"   # expand ~ manually
             if [[ ! -f "$pub_path" ]]; then
-                warn "File not found: $pub_path — SSH key will not be set."
+                warn "File not found: $pub_path. SSH key will not be set."
                 SSH_KEY=""
             else
                 SSH_KEY="$(_ensure_key_comment "$(cat "$pub_path")")"
@@ -727,7 +727,7 @@ _prompt_ssh_key() {
             local pub_files=()
             mapfile -t pub_files < <(find "$HOME/.ssh" -maxdepth 1 -name "*.pub" 2>/dev/null | sort)
             if [[ ${#pub_files[@]} -eq 0 ]]; then
-                warn "No .pub files found in $HOME/.ssh/ — SSH key will not be set."
+                warn "No .pub files found in $HOME/.ssh/: SSH key will not be set."
                 SSH_KEY=""
                 return
             fi
@@ -744,14 +744,14 @@ _prompt_ssh_key() {
                 SSH_KEY="$(_ensure_key_comment "$(cat "${pub_files[$((sel-1))]}")")"
                 success "Key loaded: ${pub_files[$((sel-1))]}"
             else
-                warn "Invalid selection — SSH key will not be set."
+                warn "Invalid selection: SSH key will not be set."
                 SSH_KEY=""
             fi
             ;;
         4)
             read -rp "GitHub username: " gh_user
             if [[ -z "$gh_user" ]]; then
-                warn "No username entered — SSH key will not be set."
+                warn "No username entered: SSH key will not be set."
                 SSH_KEY=""
             else
                 info "Fetching keys from github.com/${gh_user}..."
@@ -759,10 +759,10 @@ _prompt_ssh_key() {
                 gh_keys=$(wget -qO- "https://github.com/${gh_user}.keys" 2>/dev/null || true)
                 if [[ -z "$gh_keys" ]]; then
                     warn "No public keys found for GitHub user '${gh_user}'."
-                    warn "SSH key will not be set — double-check the username."
+                    warn "SSH key will not be set: double-check the username."
                     SSH_KEY=""
                 else
-                    # GitHub strips comments — store the raw key and prompt for comment
+                    # GitHub strips comments: store the raw key and prompt for comment
                     SSH_KEY="$(_ensure_key_comment "$gh_keys")"
                     success "GitHub key set for user: $gh_user"
                 fi
@@ -773,7 +773,7 @@ _prompt_ssh_key() {
             info "No SSH key will be set. You can add one manually after cloning."
             ;;
         *)
-            warn "Invalid choice — SSH key will not be set."
+            warn "Invalid choice: SSH key will not be set."
             SSH_KEY=""
             ;;
     esac
@@ -783,7 +783,7 @@ _prompt_ssh_key() {
 # cloud-init snippets / user-data (optional)
 # =============================================================================
 # Proxmox can attach a user-data YAML snippet to a VM so cloud-init applies
-# it on first boot of every clone. This is optional — if the chosen storage
+# it on first boot of every clone. This is optional: if the chosen storage
 # has a 'snippets' content type, we offer to create a minimal user-data file.
 #
 # The snippet enables password auth (off by default in Ubuntu cloud images)
@@ -796,15 +796,15 @@ SNIPPETS_FILE=""
 
 _prompt_snippets() {
     # In unattended mode: only proceed if SNIPPETS_STOR is already set in config.
-    # Skip the search entirely if not — the user made that choice when they built
+    # Skip the search entirely if not: the user made that choice when they built
     # the profile.
     if [[ "$UNATTENDED" == "yes" ]]; then
         if [[ -n "${SNIPPETS_STOR:-}" ]]; then
-            info "Unattended mode — using snippet storage from config: $SNIPPETS_STOR"
+            info "Unattended mode: using snippet storage from config: $SNIPPETS_STOR"
             SNIPPETS_ENABLED="yes"
             SNIPPETS_FILE="${TEMPL_NAME}-user-data.yaml"
         else
-            info "Unattended mode — no snippet storage configured, skipping."
+            info "Unattended mode: no snippet storage configured, skipping."
         fi
         return
     fi
@@ -833,11 +833,11 @@ _prompt_snippets() {
 
     echo "  A cloud-init user-data snippet can be attached to this template."
     echo "  Every VM cloned from it will automatically receive these settings"
-    echo "  on first boot — useful for package updates, SSH hardening, etc."
+    echo "  on first boot: useful for package updates, SSH hardening, etc."
     echo ""
     echo "  The generated snippet will:"
     echo "    - Enable password authentication over SSH (disabled by default"
-    echo "      in Ubuntu cloud images — important if you don't set an SSH key)"
+    echo "      in Ubuntu cloud images: important if you don't set an SSH key)"
     echo "    - Run apt-get upgrade on first boot"
     echo "    - Set the hostname from the VM name"
     echo ""
@@ -861,7 +861,7 @@ _prompt_snippets() {
         if [[ "$sel" =~ ^[0-9]+$ ]] && (( sel >= 1 && sel <= ${#snippet_stores[@]} )); then
             SNIPPETS_STOR="${snippet_stores[$((sel-1))]}"
         else
-            warn "Invalid selection — skipping snippet creation."
+            warn "Invalid selection: skipping snippet creation."
             return
         fi
     fi
@@ -953,14 +953,14 @@ user_prompts() {
         CLOUD_USER="${CLOUD_USER_DEFAULT}"
         CLOUD_PASSWORD="${CLOUD_PASSWORD_DEFAULT}"
         EXTRA_VIRT_PKGS="${EXTRA_VIRT_PKGS:-}"
-        info "Unattended mode — using all values from config."
+        info "Unattended mode: using all values from config."
         info "Cloud-Init password will be auto-generated and shown at the end."
         return
     fi
 
     header "Template Configuration"
 
-    # Template name — use --name flag value if already set
+    # Template name: use --name flag value if already set
     if [[ -z "${TEMPL_NAME:-}" ]]; then
         read -rp "Template name [${TEMPL_NAME_DEFAULT}]: " input
         TEMPL_NAME="${input:-$TEMPL_NAME_DEFAULT}"
@@ -992,10 +992,10 @@ user_prompts() {
     read -rp "VLAN tag (leave blank for none) [${VLAN:-}]: " input
     VLAN="${input:-$VLAN}"
 
-    # Disk size — user enters a number, G is appended automatically
+    # Disk size: user enters a number, G is appended automatically
     echo ""
     local disk_default_num="${DISK_SIZE//[^0-9]/}"   # strip any existing unit
-    echo "Disk size in GB (numbers only — 'G' will be added automatically):"
+    echo "Disk size in GB (numbers only: 'G' will be added automatically):"
     read -rp "Disk size in GB [${disk_default_num}]: " input
     input="${input//[^0-9]/}"                         # strip any unit the user typed anyway
     input="${input:-$disk_default_num}"
@@ -1009,12 +1009,12 @@ user_prompts() {
     read -rp "Tags [${TAG}]: " input
     TAG="${input:-$TAG}"
 
-    # CPU type — numbered list to prevent typos
+    # CPU type: numbered list to prevent typos
     echo ""
     local cpu_options=("host" "kvm64" "x86-64-v2-AES" "x86-64-v3")
     local cpu_descriptions=(
-        "Recommended — exposes host CPU directly, best performance. Use unless you need live migration across different CPU generations."
-        "Safer for mixed-CPU clusters — lower performance but broadly compatible."
+        "Recommended: exposes host CPU directly, best performance. Use unless you need live migration across different CPU generations."
+        "Safer for mixed-CPU clusters: lower performance but broadly compatible."
         "Broader feature set than kvm64, still widely compatible with modern hardware."
         "Good balance of features for modern homogeneous environments."
     )
@@ -1201,7 +1201,7 @@ create_vm() {
         --ciuser     "$CLOUD_USER" \
         --cipassword "$CLOUD_PASSWORD" \
         --ciupgrade  "0"
-    # Mark VM as created — error handler will destroy it if anything fails from here
+    # Mark VM as created: error handler will destroy it if anything fails from here
     VMID_CREATED="$VMID"
 
     info "Importing disk (format: $STORAGE_FORMAT, backend: $STORAGE_BACKEND)..."
@@ -1305,10 +1305,10 @@ apply_ssh_key() {
     # instead of the actual fetched key string. Fetch the real key on the fly.
     if [[ "$key" == github.com/* ]]; then
         local gh_user="${key#github.com/}"
-        info "Config contains a GitHub reference — fetching key for user: $gh_user"
+        info "Config contains a GitHub reference, fetching key for user: $gh_user"
         key=$(wget -qO- "https://github.com/${gh_user}.keys" 2>/dev/null | tr -d '\r\n' || true)
         if [[ -z "$key" ]]; then
-            die "Could not fetch SSH key from github.com/${gh_user}.keys — check the username and your internet connection."
+            die "Could not fetch SSH key from github.com/${gh_user}.keys. Check the username and your internet connection."
         fi
         # Update SSH_KEY so write_config saves the literal key going forward
         SSH_KEY="$key"
@@ -1344,7 +1344,7 @@ maybe_convert_to_template() {
     # In unattended mode with no explicit flag, default to no conversion
     if [[ "$UNATTENDED" == "yes" && -z "$do_convert" ]]; then
         do_convert="no"
-        info "Unattended mode — skipping template conversion. Run 'qm template $VMID' when ready."
+        info "Unattended mode: skipping template conversion. Run 'qm template $VMID' when ready."
     fi
 
     if [[ -z "$do_convert" ]]; then
@@ -1361,7 +1361,7 @@ maybe_convert_to_template() {
         qm template "$VMID"
         success "VM $VMID converted to template."
     else
-        info "Skipping template conversion — VM $VMID left as a regular VM."
+        info "Skipping template conversion: VM $VMID left as a regular VM."
         info "To convert later, run:  qm template $VMID"
     fi
 }
@@ -1379,18 +1379,18 @@ cleanup() {
     # Clean up any leftover notes temp files
     rm -f /tmp/proxmox-notes-*.txt 2>/dev/null || true
 
-    # Working image (virt-customised) — always remove, it's single-use
+    # Working image (virt-customised): always remove, it's single-use
     local image_path="$WORK_DIR/${DISK_IMAGE:-}"
     if [[ -n "${DISK_IMAGE:-}" && -f "$image_path" ]]; then
         info "Removing working image (already imported into Proxmox)..."
         rm -vf "$image_path"
     fi
 
-    # Pristine image — offer to keep for future runs (saves re-downloading)
+    # Pristine image: offer to keep for future runs (saves re-downloading)
     local pristine_path="$WORK_DIR/${DISK_IMAGE:-}.pristine"
     if [[ -n "${DISK_IMAGE:-}" && -f "$pristine_path" ]]; then
         if [[ "$UNATTENDED" == "yes" ]]; then
-            info "Unattended mode — keeping pristine image for future runs."
+            info "Unattended mode: keeping pristine image for future runs."
         else
             echo ""
             echo "  The pristine (unmodified) image is kept at:"
@@ -1409,11 +1409,11 @@ cleanup() {
 }
 
 # =============================================================================
-# Config profile — name capture and file write are separate so the file can
+# Config profile: name capture and file write are separate so the file can
 # be written immediately after the user confirms, before any work begins.
 # =============================================================================
 
-# Step 1 — ask for a profile name right after the user presses Y.
+# Step 1: ask for a profile name right after the user presses Y.
 # Sets PROFILE_NAME and PROFILE_PATH; empty means the user declined.
 prompt_config_name() {
     echo ""
@@ -1449,7 +1449,7 @@ prompt_config_name() {
     write_config
 }
 
-# Step 2 — write the config file. Called immediately after prompt_config_name
+# Step 2: write the config file. Called immediately after prompt_config_name
 # and again at the end of a successful run to update CONVERT_TO_TEMPLATE if
 # the user answered that interactively.
 write_config() {
@@ -1460,7 +1460,7 @@ write_config() {
 # Generated by ${SCRIPT_NAME} on $(date '+%Y-%m-%d %H:%M')
 # Usage: ./${SCRIPT_NAME} --config ${PROFILE_NAME}.conf
 #
-# Note: VMID is intentionally not saved — it is always assigned interactively
+# Note: VMID is intentionally not saved. It is always assigned interactively
 # or defaulted to VMID_DEFAULT to avoid clashes on subsequent runs.
 
 # Ubuntu version
@@ -1499,7 +1499,7 @@ CLOUD_USER_DEFAULT="${CLOUD_USER}"
 # CLOUD_PASSWORD_DEFAULT is intentionally not saved for security.
 
 # SSH key
-# Unlike the script defaults, it IS safe to store your key here — this .conf
+# Unlike the script defaults, it IS safe to store your key here: this .conf
 # file is personal to you and not part of the shared script. It will not be
 # committed to any repo unless you explicitly add it.
 # This can be a full public key string, or a GitHub URL (github.com/<username>).
@@ -1529,7 +1529,7 @@ EOF
 # Summary before proceeding
 # =============================================================================
 print_summary() {
-    header "Summary — Review Before Proceeding"
+    header "Summary: Review Before Proceeding"
     echo ""
 
     local ssh_display
@@ -1568,7 +1568,7 @@ print_summary() {
     echo ""
 
     if [[ "$UNATTENDED" == "yes" ]]; then
-        warn "Running in unattended mode. Starting in 5 seconds — press Ctrl+C to abort."
+        warn "Running in unattended mode. Starting in 5 seconds: press Ctrl+C to abort."
         for i in 5 4 3 2 1; do
             printf "\r  Starting in %s... " "$i"
             sleep 1
@@ -1587,7 +1587,7 @@ print_summary() {
         exit 0
     fi
 
-    # Save the profile immediately — before any work begins — so answers are
+    # Save the profile immediately, before any work begins, so answers are
     # preserved if the run fails partway through.
     prompt_config_name
 }
@@ -1634,14 +1634,14 @@ main() {
 
     if [[ "$UNATTENDED" == "yes" ]]; then
         echo ""
-        warn "Cloud-Init password (auto-generated — change this after first login):"
+        warn "Cloud-Init password (auto-generated: change this after first login):"
         echo "  User:     $CLOUD_USER"
         echo "  Password: $CLOUD_PASSWORD"
         echo ""
         info "To change the password in Proxmox: qm set $VMID --cipassword '<newpassword>' && qm cloudinit update $VMID"
     fi
 
-    # Disarm the error handler — run completed successfully
+    # Disarm the error handler: run completed successfully
     VMID_CREATED=""
 }
 
