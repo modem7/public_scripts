@@ -16,7 +16,7 @@ declare -a CLONE_NAMES=(
 )
 
 AGENT_TIMEOUT=120   # seconds to wait for guest agent to become ready
-EXEC_TIMEOUT=600    # seconds to wait for guest script to complete
+EXEC_TIMEOUT=900    # seconds to wait for guest script to complete (raised: kernel unpacks are slow)
 
 # Python snippet to extract out-data from QGA JSON output.
 # Stored in a variable so shellcheck does not attempt to parse its contents.
@@ -39,8 +39,6 @@ qga_decode() {
 }
 
 # Run a SHORT command synchronously in the guest and return decoded stdout.
-# --timeout 30 forces synchronous behaviour regardless of command duration.
-# Do NOT use for long-running commands — use nohup+poll_guest_pid for those.
 qga_exec() {
     local vmid=$1
     shift
@@ -75,13 +73,37 @@ wait_for_shutdown() {
 # =============================================================================
 
 MAIN_SCRIPT='#!/bin/bash
-set -euo pipefail
+set -uo pipefail
 SCRIPT=/tmp/pve-update.sh
-trap '\''echo $? > ${SCRIPT}.rc'\'' EXIT
+FAILSTEP_FILE=/tmp/pve-update.sh.failstep
+
+on_exit() {
+    local rc=$?
+    echo "${rc}" > "${SCRIPT}.rc"
+    if [ "${rc}" -ne 0 ] && [ -f "${FAILSTEP_FILE}" ]; then
+        echo "[guest] FAILED at step: $(cat ${FAILSTEP_FILE})" >&2
+    fi
+}
+trap on_exit EXIT
+
+step() { echo "$1" > "${FAILSTEP_FILE}"; echo "[guest] >> $1"; }
 
 export DEBIAN_FRONTEND=noninteractive
 
-echo "[guest] Checking cloud-init..."
+step "dpkg sanity check"
+# If a previous run was interrupted mid-unpack, dpkg refuses everything
+# until it is reconfigured. Detect and self-heal instead of failing every
+# subsequent run at the same spot.
+if ! dpkg --audit >/dev/null 2>&1 || grep -qs "half-installed\|half-configured\|unpacked" <(dpkg -l 2>/dev/null | awk "{print \$1}"); then
+    echo "[guest] dpkg looks interrupted, running dpkg --configure -a..."
+    dpkg --configure -a || {
+        echo "[guest] dpkg --configure -a failed, trying apt-get -f install..." >&2
+        apt-get -y -f install || true
+        dpkg --configure -a
+    }
+fi
+
+step "check cloud-init"
 if cloud-init status 2>/dev/null | grep -qE '\''running|waiting'\''; then
     echo "[guest] Waiting for cloud-init to finish..."
     cloud-init status --wait > /dev/null 2>&1
@@ -89,75 +111,116 @@ else
     echo "[guest] cloud-init not active, skipping wait."
 fi
 
-echo "[guest] Updating package lists..."
-aptitude update
+step "apt update"
+if ! aptitude update 2>&1; then
+    echo "[guest] aptitude update failed, retrying once after dpkg --configure -a..." >&2
+    dpkg --configure -a || true
+    aptitude update
+fi
 
-echo "[guest] Running safe-upgrade..."
-aptitude safe-upgrade -y
+step "apt safe-upgrade"
+if ! aptitude safe-upgrade -y 2>&1; then
+    echo "[guest] safe-upgrade failed. dpkg state:" >&2
+    dpkg --audit >&2 || true
+    exit 1
+fi
 
+step "check reboot-required"
 if [ -f /var/run/reboot-required ]; then
     echo "[guest] Reboot required."
     touch /tmp/pve-reboot-needed
-    echo 0 > /tmp/pve-update.sh.rc
+    echo 0 > "${SCRIPT}.rc"
+    step "reboot"
     reboot
+    exit 0
 fi
 
-echo "[guest] No reboot needed, running cleanup..."
+step "cleanup: autoremove"
 apt-get -y autoremove --purge
+step "cleanup: apt clean"
 apt-get -y clean
 apt-get -y autoclean
+step "cleanup: fstrim"
 fstrim -av
 
+step "cleanup: cloud-init clean"
 cloud-init clean
 truncate -s 0 /etc/machine-id
 truncate -s 0 /var/lib/dbus/machine-id
 rm -f ~/.bash_history
 truncate -s 0 /root/.bash_history
 
+step "done"
 sync
 echo "[guest] Done."'
 
 POSTREBOOT_SCRIPT='#!/bin/bash
-set -euo pipefail
+set -uo pipefail
 SCRIPT=/tmp/pve-postreboot.sh
-trap '\''echo $? > ${SCRIPT}.rc'\'' EXIT
+FAILSTEP_FILE=/tmp/pve-postreboot.sh.failstep
+
+on_exit() {
+    local rc=$?
+    echo "${rc}" > "${SCRIPT}.rc"
+    if [ "${rc}" -ne 0 ] && [ -f "${FAILSTEP_FILE}" ]; then
+        echo "[guest] FAILED at step: $(cat ${FAILSTEP_FILE})" >&2
+    fi
+}
+trap on_exit EXIT
+
+step() { echo "$1" > "${FAILSTEP_FILE}"; echo "[guest] >> $1"; }
 
 export DEBIAN_FRONTEND=noninteractive
+
+step "dpkg sanity check"
+if ! dpkg --audit >/dev/null 2>&1; then
+    echo "[guest] dpkg looks interrupted post-reboot, running dpkg --configure -a..."
+    dpkg --configure -a || {
+        apt-get -y -f install || true
+        dpkg --configure -a
+    }
+fi
+
+step "cleanup: autoremove"
 apt-get -y autoremove --purge
+step "cleanup: apt clean"
 apt-get -y clean
 apt-get -y autoclean
+step "cleanup: fstrim"
 fstrim -av
 
+step "cleanup: cloud-init clean"
 cloud-init clean
 truncate -s 0 /etc/machine-id
 truncate -s 0 /var/lib/dbus/machine-id
 rm -f ~/.bash_history
 truncate -s 0 /root/.bash_history
 
+step "done"
 sync
 echo "[guest] Post-reboot cleanup done."'
 
 # =============================================================================
 
 push_guest_script() {
-    # Write a script into the guest using --pass-stdin, then chmod +x.
-    # --pass-stdin pipes the content directly, avoiding base64 encode/decode.
-    # --timeout 30 ensures synchronous completion.
     local vmid=$1 content=$2 dst=$3
-    printf '%s' "${content}" | \
+    if ! printf '%s' "${content}" | \
         $QM guest exec "${vmid}" --pass-stdin 1 --timeout 30 -- \
         /bin/bash -c "cat > ${dst} && chmod +x ${dst}" \
         > /dev/null 2>&1
+    then
+        die "[VM ${vmid}] Failed to push script to ${dst}"
+    fi
 }
 
 launch_guest_script() {
-    # Fire a script in the background via nohup. No --timeout here since
-    # nohup forks and returns instantly — tracked via poll_guest_pid.
     local vmid=$1 script=$2 logfile=$3 pidfile=$4
+    # Clear stale rc/failstep files from a previous run before launching,
+    # so a crash before the trap fires can't be misread as a stale success.
+    qga_exec "${vmid}" /bin/bash -c "rm -f ${logfile}.rc ${logfile%.log}.failstep ${logfile}" || true
     $QM guest exec "${vmid}" -- \
         /bin/bash -c "nohup ${script} >${logfile} 2>&1 & echo \$! >${pidfile}" \
         > /dev/null 2>&1 || true
-    # Brief pause to let nohup detach before we start polling
     sleep 2
 }
 
@@ -170,7 +233,6 @@ poll_guest_pid() {
         sleep 10
         elapsed=$(( elapsed + 10 ))
 
-        # Stream any new log lines, prefixed with VM ID
         local log_output
         log_output=$(qga_exec "${vmid}" /bin/bash -c "cat ${logfile} 2>/dev/null || true" || true)
         if [[ -n "${log_output}" ]]; then
@@ -182,7 +244,6 @@ poll_guest_pid() {
             last_log_size=$(echo "${log_output}" | wc -l)
         fi
 
-        # Check liveness of the background PID
         local raw_status
         raw_status=$(qga_exec "${vmid}" /bin/bash -c \
             "pid=\$(cat ${pidfile} 2>/dev/null) || { echo stopped; exit 0; }
@@ -191,21 +252,32 @@ poll_guest_pid() {
         local status="${raw_status:-stopped}"
 
         if [[ "${status}" != "running" ]]; then
-            # Allow trap to finish writing the rc file before reading it
             sleep 2
             local raw_rc
             raw_rc=$(qga_exec "${vmid}" /bin/bash -c \
-                "cat ${rcfile} 2>/dev/null || echo 1" \
+                "cat ${rcfile} 2>/dev/null || echo unknown" \
                 | tr -d '[:space:]' || true)
-            local rc="${raw_rc:-1}"
+            local rc="${raw_rc:-unknown}"
+
+            if [[ "${rc}" == "unknown" ]]; then
+                # Process died without ever writing an rc file — e.g. OOM-killed,
+                # guest agent lost the connection, or the trap never ran.
+                die "[VM ${vmid}] Guest process vanished with no exit code recorded (log: ${logfile})"
+            fi
+
             if [[ "${rc}" != "0" ]]; then
-                die "[VM ${vmid}] Guest script exited with code ${rc}"
+                local failstep
+                failstep=$(qga_exec "${vmid}" /bin/bash -c \
+                    "cat ${logfile%.log}.failstep 2>/dev/null || echo unknown" || true)
+                die "[VM ${vmid}] Guest script exited with code ${rc} at step '${failstep:-unknown}' — see log above"
             fi
             log "[VM ${vmid}] Guest script completed successfully"
             return 0
         fi
 
-        (( elapsed >= EXEC_TIMEOUT )) && die "[VM ${vmid}] Timed out waiting for guest script"
+        if (( elapsed >= EXEC_TIMEOUT )); then
+            die "[VM ${vmid}] Timed out after ${EXEC_TIMEOUT}s waiting for guest script (log: ${logfile})"
+        fi
     done
 }
 
@@ -285,20 +357,27 @@ done
 # =============================================================================
 log "=== Step 3: Updating source VMs (concurrent) ==="
 declare -a UPDATE_PIDS=()
+declare -a UPDATE_VMIDS=()
 for vmid in "${SOURCE_VMS[@]}"; do
     log "Spawning update for VM ${vmid}..."
     update_vm "${vmid}" 2>&1 &
     UPDATE_PIDS+=($!)
+    UPDATE_VMIDS+=("${vmid}")
 done
 
 log "Waiting for all VM updates to complete..."
 FAILED=0
-for pid in "${UPDATE_PIDS[@]}"; do
-    if ! wait "${pid}"; then
+declare -a FAILED_VMIDS=()
+for i in "${!UPDATE_PIDS[@]}"; do
+    if ! wait "${UPDATE_PIDS[$i]}"; then
         FAILED=1
+        FAILED_VMIDS+=("${UPDATE_VMIDS[$i]}")
     fi
 done
-(( FAILED )) && die "One or more VM updates failed"
+
+if (( FAILED )); then
+    die "Update failed for VM(s): ${FAILED_VMIDS[*]} — see per-VM errors above. Not proceeding to clone/template steps."
+fi
 log "=== All VM updates completed ==="
 
 # =============================================================================
@@ -319,7 +398,9 @@ done
 log "=== Step 5: Cloning VMs ==="
 for i in "${!SOURCE_VMS[@]}"; do
     log "Cloning ${SOURCE_VMS[$i]} -> ${CLONE_VMS[$i]} (${CLONE_NAMES[$i]})..."
-    $QM clone "${SOURCE_VMS[$i]}" "${CLONE_VMS[$i]}" --name "${CLONE_NAMES[$i]}"
+    if ! $QM clone "${SOURCE_VMS[$i]}" "${CLONE_VMS[$i]}" --name "${CLONE_NAMES[$i]}"; then
+        die "Clone failed: ${SOURCE_VMS[$i]} -> ${CLONE_VMS[$i]}"
+    fi
 done
 
 # =============================================================================
@@ -327,8 +408,12 @@ done
 # =============================================================================
 log "=== Step 6: Configuring and converting clones ==="
 for vmid in "${CLONE_VMS[@]}"; do
-    $QM set "${vmid}" --ipconfig0 ip=dhcp
-    $QM template "${vmid}"
+    if ! $QM set "${vmid}" --ipconfig0 ip=dhcp; then
+        die "Failed to set ipconfig on VM ${vmid}"
+    fi
+    if ! $QM template "${vmid}"; then
+        die "Failed to convert VM ${vmid} to template"
+    fi
     log "VM ${vmid} converted to template"
 done
 
