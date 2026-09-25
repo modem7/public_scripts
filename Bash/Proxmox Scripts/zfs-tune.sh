@@ -188,6 +188,8 @@ done
 [[ ${#POOLS[@]} -gt 0 ]] || die "No pools eligible for tuning. Exiting."
 
 # ── Host detection ────────────────────────────────────────────────────────────
+echo
+echo "--- Host ---"
 TOTAL_RAM_BYTES=$(( $(awk '/MemTotal/ {print $2}' /proc/meminfo) * 1024 ))
 [[ -d /sys/firmware/efi ]] && BOOT_FW="UEFI" || BOOT_FW="legacy BIOS"
 ROOT_FS=$(findmnt -no FSTYPE / 2>/dev/null)
@@ -206,10 +208,12 @@ done
 # A boot pool is only safe to upgrade / change dnodesize when the bootloader
 # does not read it directly. proxmox-boot-tool copies kernels to the ESP, so
 # GRUB/systemd-boot never touch the pool.
+# Output is captured first: piping into `grep -q` can SIGPIPE the tool, which
+# pipefail would turn into a false negative.
 PBT_MANAGED=0
-if command -v proxmox-boot-tool >/dev/null 2>&1 && \
-   proxmox-boot-tool status 2>/dev/null | grep -q "is configured with"; then
-  PBT_MANAGED=1
+if command -v proxmox-boot-tool >/dev/null 2>&1; then
+  PBT_STATUS=$(proxmox-boot-tool status 2>&1)
+  grep -q "is configured with" <<<"$PBT_STATUS" && PBT_MANAGED=1
 fi
 boot_locked() { [[ $PBT_MANAGED -eq 0 ]] && in_list "$1" "${BOOT_POOLS[@]}"; }
 
@@ -618,12 +622,20 @@ if [[ -f /etc/pve/storage.cfg ]]; then
     in_list "${pool%%/*}" "${POOLS[@]}" || continue
     LARGE=$(zfs get -H -r -t volume -o value volblocksize "$pool" 2>/dev/null \
               | awk '{ v = $1; sub(/K$/, "", v); if (v + 0 > 16) n++ } END { print n + 0 }')
-    if [[ "${bs,,}" =~ ^(32k|64k|128k)$ || "$LARGE" -gt 0 ]]; then
+    LARGE_BS=0
+    [[ "${bs,,}" =~ ^(32k|64k|128k|256k|512k|1m)$ ]] && LARGE_BS=1
+    if [[ $LARGE_BS -eq 1 || "$LARGE" -gt 0 ]]; then
       note "storage '$store' — blocksize ${bs:-16k (default)}, $LARGE zvol(s) above 16K volblocksize"
       info "Every guest write smaller than the block rewrites the whole block (read-modify-write),"
       info "adding write amplification and SSD wear. 16k is the Proxmox/OpenZFS default for"
       info "general VM use; keep larger blocks for large sequential workloads only."
-      info "Affects new disks only: pvesm set $store --blocksize 16k, then restore or move disks."
+      if [[ $LARGE_BS -eq 1 ]]; then
+        info "For new disks: pvesm set $store --blocksize 16k"
+      fi
+      if [[ "$LARGE" -gt 0 ]]; then
+        info "Existing zvols keep their volblocksize until re-created: restore from backup,"
+        info "or move the disk to another storage and back."
+      fi
     fi
   done < <(awk '
     /^[a-z]+:/ { if (type == "zfspool" && pool != "") print store, pool, bs; split($0, a, /:[ \t]*/); type = a[1]; store = a[2]; pool = ""; bs = "" }
