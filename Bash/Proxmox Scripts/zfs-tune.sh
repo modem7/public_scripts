@@ -168,7 +168,7 @@ for p in "${INCLUDE_POOLS[@]}" "${EXCLUDE_POOLS[@]}"; do
   in_list "$p" "${ALL_POOLS[@]}" || die "Pool '$p' does not exist. Exiting."
 done
 
-echo "--- Pools ---"
+echo "--- Host & pools ---"
 POOLS=()
 for pool in "${ALL_POOLS[@]}"; do
   HEALTH=$(zpool list -H -o health "$pool")
@@ -188,8 +188,6 @@ done
 [[ ${#POOLS[@]} -gt 0 ]] || die "No pools eligible for tuning. Exiting."
 
 # ── Host detection ────────────────────────────────────────────────────────────
-echo
-echo "--- Host ---"
 TOTAL_RAM_BYTES=$(( $(awk '/MemTotal/ {print $2}' /proc/meminfo) * 1024 ))
 [[ -d /sys/firmware/efi ]] && BOOT_FW="UEFI" || BOOT_FW="legacy BIOS"
 ROOT_FS=$(findmnt -no FSTYPE / 2>/dev/null)
