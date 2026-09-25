@@ -2,46 +2,62 @@
 # ============================================================================
 #  Claude Code VM Provisioner (Ubuntu 24.04)
 #  Installs and configures a full Claude Code dev environment on an existing
-#  Ubuntu 24.04 VM, using a regular sudo-capable user (no root login required).
+#  Ubuntu VM, as a regular sudo-capable user (no root login required).
 #
 #  Adapted from https://github.com/serversathome/ServersatHome/blob/main/agentic.sh
-#  - Removed: Proxmox host checks, LXC container creation/start, root-only SSH
-#    login setup, timezone override, and the Watchtower / Code-Server compose
-#    stacks (Docker itself is still installed).
-#  - Adapted: everything that ran as root inside a fresh LXC now runs as your
-#    normal user, escalating with `sudo` only where actually required.
-#  - Added: GitHub CLI (gh) + SSH key generation so this VM can push/pull from
-#    GitHub, and notes for driving Claude Code on this VM from the Claude
-#    Desktop app on Windows via Remote Control (outbound-HTTPS only, no
-#    inbound ports needed).
-#  - Locale set to en_GB.UTF-8. Ctrl+C during the run is trapped for a clean
-#    exit instead of leaving background processes or a half-configured apt.
-#  - Only languages, build tools, and Claude Code itself are unconditional.
-#    Docker, GitHub CLI + SSH/auth, the recommended plugin bundle, and the
-#    webapp-testing skill + Playwright are each asked about up front (Y/n,
-#    default yes) as opinionated good-practice extras — decline any of them
-#    and the generated settings.json / CLAUDE.md reflect that (no dangling
-#    references to tools that were never installed).
-#  - Plugin bundle (if accepted): frontend-design, code-review,
-#    commit-commands, security-guidance, context7, superpowers,
-#    deployment-engineer (community, from ccplugins/awesome-claude-code-plugins),
-#    plus docker/github plugins if those extras were also accepted.
-#  - Idempotent: safe to re-run. apt installs, GitHub CLI auth, SSH key
-#    generation, shell rc blocks, and the webapp-testing skill copy all check
-#    existing state before acting instead of blindly re-doing/duplicating it.
-#  - Claude Code itself installs from Anthropic's signed apt repo (gpg
-#    fingerprint verified against the published key), not the curl|bash
-#    native installer — same binary, but plain `apt upgrade claude-code`
-#    updates instead of a self-updating background process.
-#  - Shell env (PATH, aliases, cargo env, project auto-cd) is written to both
-#    ~/.bashrc and ~/.zshrc (if zsh is installed), each idempotently.
 #
-#  Run on the target VM (as the sudo user, NOT as root):
-#    curl -fsSL <raw-url-to-this-file> -o /tmp/claude-code-vm-setup.sh && bash /tmp/claude-code-vm-setup.sh
+#  What it does:
+#  - Always: locale, core/build packages, Node.js LTS, Go, Rust, Claude Code.
+#  - Optional (asked up front, default yes): Docker, GitHub CLI + SSH key +
+#    `gh auth login`, the webapp-testing skill (Python Playwright), weekly
+#    unattended apt upgrades.
+#  - Claude Code config comes from ONE of:
+#      a) claude-config-sync (https://github.com/modem7/claude-config-sync):
+#         give it your private sync repo URL and it clones it to
+#         ~/claude-config and runs its install.sh, so settings.json, CLAUDE.md,
+#         hooks, skills, plugins and memory all come from your repo; or
+#      b) a local baseline settings.json (+ optional plugin bundle), MERGED
+#         into any existing file rather than overwriting it.
+#  - Remote Control auto-start, so the VM can be driven from Claude Desktop /
+#    claude.ai/code (outbound HTTPS only, no inbound ports).
 #
+#  Safe to re-run: every step checks existing state first. Generated shell rc
+#  and CLAUDE.md content lives between marker comments and is refreshed in
+#  place; anything you add outside the markers is left alone.
+#
+#  Usage (as the sudo user, NOT root):
+#    curl -fsSL <raw-url-to-this-file> -o /tmp/claude-code-vm-setup.sh
+#    bash /tmp/claude-code-vm-setup.sh [--yes] [--sync-repo URL | --no-sync]
+#
+#  Every prompt can be pre-answered with an environment variable, for
+#  unattended runs (booleans accept y/yes/true/1 or n/no/false/0):
+#    GIT_NAME, GIT_EMAIL             git identity
+#    SETUP_GITHUB                    gh CLI + SSH key + gh auth login
+#    INSTALL_DOCKER                  Docker Engine + Compose plugin
+#    CLAUDE_SYNC_REPO_URL            claude-config-sync repo ("" = don't use it)
+#    INSTALL_PLUGINS                 plugin bundle (local config mode only)
+#    INSTALL_WEBAPP_TESTING          webapp-testing skill + Playwright
+#    AUTO_UPDATE                     weekly apt upgrade cron
+#  Other knobs:
+#    PROJECT_DIR      (default ~/project)   LOCALE (default en_GB.UTF-8)
+#    NODE_MAJOR       (default 24)          CLAUDE_INSTALL_METHOD (apt|native)
+#    CLAUDE_SYNC_REPO_DIR (default ~/claude-config)
 # ============================================================================
 
 set -euo pipefail
+
+# ── Defaults ───────────────────────────────────────────────────────────────
+PROJECT_DIR="${PROJECT_DIR:-$HOME/project}"
+LOCALE="${LOCALE:-en_GB.UTF-8}"
+NODE_MAJOR_EXPLICIT="${NODE_MAJOR:+true}"
+NODE_MAJOR="${NODE_MAJOR:-24}"
+CLAUDE_INSTALL_METHOD="${CLAUDE_INSTALL_METHOD:-apt}"
+CLAUDE_SYNC_REPO_DIR="${CLAUDE_SYNC_REPO_DIR:-$HOME/claude-config}"
+CLAUDE_APT_KEY_FPR="31DDDE24DDFAB679F42D7BD2BAA929FF1A7ECACE"
+ASSUME_YES="false"
+# Distinguishes "not set" from "set to empty" (= explicitly don't sync).
+SYNC_URL_PRESET="${CLAUDE_SYNC_REPO_URL+set}"
+CLAUDE_SYNC_REPO_URL="${CLAUDE_SYNC_REPO_URL:-}"
 
 # ── Colors & Helpers ────────────────────────────────────────────────────────
 RED='\033[0;31m'
@@ -53,54 +69,148 @@ NC='\033[0m'
 
 info()    { echo -e "${CYAN}[INFO]${NC} $*"; }
 success() { echo -e "${GREEN}[OK]${NC} $*"; }
-warn()    { echo -e "${YELLOW}[WARN]${NC} $*"; }
-error()   { echo -e "${RED}[ERROR]${NC} $*"; exit 1; }
+warn()    { echo -e "${YELLOW}[WARN]${NC} $*" >&2; }
+error()   { echo -e "${RED}[ERROR]${NC} $*" >&2; exit 1; }
+have()    { command -v "$1" >/dev/null 2>&1; }
+# Prints "<cmd output> | <awk field>" or "n/a" — never fails, so it's safe
+# inside assignments under set -e / pipefail.
+ver()     { local out; out=$("${@:2}" 2>/dev/null | head -1 | awk "{print \$$1}") || true; echo "${out:-n/a}"; }
+is_true() { [[ "${1,,}" =~ ^(y|yes|true|1)$ ]]; }
+
+step() {
+  CURRENT_STEP="$1"
+  echo -e "\n${BOLD}>>> $1${NC}"
+}
 
 header() {
   echo ""
   echo -e "${BOLD}╔══════════════════════════════════════════════════╗${NC}"
-  echo -e "${BOLD}║        Claude Code VM Provisioner (Ubuntu)      ║${NC}"
+  echo -e "${BOLD}║        Claude Code VM Provisioner (Ubuntu)       ║${NC}"
   echo -e "${BOLD}╚══════════════════════════════════════════════════╝${NC}"
   echo ""
 }
 
+usage() {
+  sed -n '2,/^# =====/p' "$0" | sed -e 's/^# \{0,1\}//' -e '/^=====/d'
+}
+
+# ask_yn VAR "question" — leaves a preset env value alone (normalised to
+# true/false); otherwise prompts (default yes), or takes the default when
+# --yes was given or there's no terminal to ask on.
+ask_yn() {
+  local var="$1" question="$2" answer="${!1:-}"
+  if [[ -z "$answer" ]]; then
+    if is_true "$ASSUME_YES" || [[ ! -t 0 ]]; then
+      answer="y"
+    else
+      read -rp "$question [Y/n]: " answer
+      answer="${answer:-y}"
+    fi
+  fi
+  if is_true "$answer"; then printf -v "$var" true; else printf -v "$var" false; fi
+}
+
+# ask VAR "question" "default" — free-text version of ask_yn.
+ask() {
+  local var="$1" question="$2" default="${3:-}" answer="${!1:-}"
+  if [[ -z "$answer" ]]; then
+    if ! is_true "$ASSUME_YES" && [[ -t 0 ]]; then
+      read -rp "${question}${default:+ [$default]}: " answer
+    fi
+    answer="${answer:-$default}"
+  fi
+  printf -v "$var" '%s' "$answer"
+}
+
+# Lenient installer for nice-to-have packages: try the batch, then fall back
+# to one-by-one so a single renamed/dropped package can't abort the run.
+apt_install() {
+  if ! sudo apt-get install -y -qq "$@" >/dev/null 2>&1; then
+    warn "batch install failed; retrying individually..."
+    local p
+    for p in "$@"; do
+      sudo apt-get install -y -qq "$p" >/dev/null 2>&1 || warn "skipped (unavailable): $p"
+    done
+  fi
+}
+
+# Strict installer for packages the rest of the script depends on.
+apt_install_required() {
+  sudo apt-get install -y -qq "$@" >/dev/null || error "Failed to install required package(s): $*"
+}
+
+# write_managed_block FILE BEGIN END CONTENT — replaces the text between the
+# BEGIN/END marker lines (or appends it if absent), so re-runs refresh the
+# generated content without duplicating it or touching anything around it.
+write_managed_block() {
+  local file="$1" begin="$2" end="$3" content="$4" tmp
+  touch "$file"
+  tmp=$(mktemp -p "$WORK_DIR")
+  awk -v b="$begin" -v e="$end" '$0==b{skip=1;next} $0==e{skip=0;next} !skip' "$file" > "$tmp"
+  # Drop trailing blank lines so repeated runs don't grow the file.
+  sed -i -e :a -e '/^\n*$/{$d;N;ba' -e '}' "$tmp"
+  # shellcheck disable=SC2094 # -s check happens before the append
+  { [[ -s "$tmp" ]] && echo ""; printf '%s\n%s\n%s\n' "$begin" "$content" "$end"; } >> "$tmp"
+  cat "$tmp" > "$file"   # cat, not mv: keeps the original file's owner/mode
+}
+
 # ── Signal handling / cleanup ───────────────────────────────────────────────
-# CURRENT_STEP is updated right before each major stage so Ctrl+C tells you
-# where things stopped instead of just dying silently mid-apt-install.
+# CURRENT_STEP is updated before each stage so Ctrl+C / a failure says where
+# things stopped instead of dying silently mid-install.
 CURRENT_STEP="startup"
 SUDO_KEEPALIVE_PID=""
+WORK_DIR=$(mktemp -d)
 
 cleanup() {
   local exit_code=$?
   [[ -n "$SUDO_KEEPALIVE_PID" ]] && kill "$SUDO_KEEPALIVE_PID" 2>/dev/null
+  rm -rf "$WORK_DIR"
+  if [[ $exit_code -ne 0 && $exit_code -ne 130 ]]; then
+    echo -e "${RED}[ERROR]${NC} Failed during: ${CURRENT_STEP} (exit ${exit_code}). Fix the cause and re-run; completed steps are skipped." >&2
+  fi
   exit "$exit_code"
 }
 
 on_interrupt() {
   echo ""
   warn "Interrupted during: ${CURRENT_STEP}"
-  warn "Cleaning up and exiting. Re-run the script to pick up where package installs left off"
-  warn "(apt/dpkg is idempotent); if apt looks locked afterwards, run: sudo dpkg --configure -a"
+  warn "Re-run the script to pick up where it left off; if apt looks locked afterwards, run: sudo dpkg --configure -a"
   exit 130
 }
 
 trap cleanup EXIT
 trap on_interrupt INT TERM
 
+# ── Arguments ──────────────────────────────────────────────────────────────
+parse_args() {
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -y|--yes)    ASSUME_YES="true" ;;
+      --sync-repo) [[ -n "${2:-}" ]] || error "--sync-repo needs a URL"
+                   CLAUDE_SYNC_REPO_URL="$2"; SYNC_URL_PRESET="set"; shift ;;
+      --no-sync)   CLAUDE_SYNC_REPO_URL=""; SYNC_URL_PRESET="set" ;;
+      -h|--help)   usage; exit 0 ;;
+      *)           error "Unknown argument: $1 (see --help)" ;;
+    esac
+    shift
+  done
+}
+
 # ── Pre-flight checks ──────────────────────────────────────────────────────
 preflight() {
   [[ $(id -u) -ne 0 ]] || error "Run this as your normal user, not root/sudo. The script escalates with sudo only where needed."
-
-  command -v sudo &>/dev/null || error "sudo is required but not installed."
+  have sudo    || error "sudo is required but not installed."
+  have apt-get || error "This script needs an apt-based distro (Ubuntu 24.04 targeted)."
 
   info "Checking sudo access (you may be prompted for your password)..."
   sudo -v || error "Could not obtain sudo privileges."
 
-  # Keep sudo alive for the duration of the script
-  ( while true; do sudo -n true; sleep 60; kill -0 "$$" 2>/dev/null || exit; done ) &
+  # Keep sudo alive for the duration of the script.
+  ( while true; do sudo -n true; sleep 60; kill -0 "$$" 2>/dev/null || exit; done ) 2>/dev/null &
   SUDO_KEEPALIVE_PID=$!
 
   if [[ -f /etc/os-release ]]; then
+    # shellcheck disable=SC1091
     . /etc/os-release
     if [[ "${ID:-}" != "ubuntu" || "${VERSION_ID:-}" != "24.04" ]]; then
       warn "This script targets Ubuntu 24.04. Detected: ${PRETTY_NAME:-unknown}. Continuing anyway..."
@@ -108,264 +218,351 @@ preflight() {
   else
     warn "Could not detect OS version. Continuing anyway..."
   fi
+
+  DPKG_ARCH=$(dpkg --print-architecture)
 }
 
-# ── Git identity + optional extras (asked up front so the long install can run unattended) ──
-get_git_config() {
+# ── Questions (all asked up front so the long install can run unattended) ──
+gather_config() {
   echo -e "${BOLD}Git / GitHub Setup${NC}"
   echo "─────────────────────────────────────────────────"
+  ask GIT_NAME  "Git user.name"  "$(git config --global user.name 2>/dev/null || true)"
+  [[ -n "$GIT_NAME" ]]  || error "Git user.name is required (set GIT_NAME for unattended runs)."
+  ask GIT_EMAIL "Git user.email" "$(git config --global user.email 2>/dev/null || true)"
+  [[ -n "$GIT_EMAIL" ]] || error "Git user.email is required (set GIT_EMAIL for unattended runs)."
+  ask_yn SETUP_GITHUB "Set up GitHub access (gh CLI + SSH key + 'gh auth login')?"
+  echo ""
 
-  local default_name default_email
-  default_name=$(git config --global user.name 2>/dev/null || true)
-  default_email=$(git config --global user.email 2>/dev/null || true)
-
-  read -rp "Git user.name${default_name:+ [$default_name]}: " GIT_NAME
-  GIT_NAME="${GIT_NAME:-$default_name}"
-  [[ -n "$GIT_NAME" ]] || error "Git user.name is required."
-
-  read -rp "Git user.email${default_email:+ [$default_email]}: " GIT_EMAIL
-  GIT_EMAIL="${GIT_EMAIL:-$default_email}"
-  [[ -n "$GIT_EMAIL" ]] || error "Git user.email is required."
-
-  read -rp "Set up GitHub access now (installs gh CLI + SSH key + 'gh auth login')? [Y/n]: " SETUP_GITHUB
-  SETUP_GITHUB="${SETUP_GITHUB:-y}"
+  echo -e "${BOLD}Claude Code Config${NC}"
+  echo "─────────────────────────────────────────────────"
+  if [[ -z "$SYNC_URL_PRESET" && -d "$CLAUDE_SYNC_REPO_DIR/.git" ]]; then
+    # Already set up on a previous run — reuse it rather than asking again.
+    CLAUDE_SYNC_REPO_URL=$(git -C "$CLAUDE_SYNC_REPO_DIR" remote get-url origin 2>/dev/null || true)
+    info "Found existing claude-config-sync clone at $CLAUDE_SYNC_REPO_DIR ($CLAUDE_SYNC_REPO_URL)."
+  elif [[ -z "$SYNC_URL_PRESET" ]]; then
+    echo "If you keep your Claude Code config in a claude-config-sync repo"
+    echo "(https://github.com/modem7/claude-config-sync), enter its git URL to pull"
+    echo "settings, CLAUDE.md, hooks, skills, plugins and memory from it."
+    echo "Leave blank to generate a local baseline config instead."
+    ask CLAUDE_SYNC_REPO_URL "Sync repo URL" ""
+  fi
+  USE_SYNC=false
+  [[ -n "$CLAUDE_SYNC_REPO_URL" ]] && USE_SYNC=true
+  if $USE_SYNC && [[ "$CLAUDE_SYNC_REPO_URL" == git@github.com:* ]] && ! is_true "$SETUP_GITHUB" \
+     && ! ssh-keygen -F github.com >/dev/null 2>&1; then
+    warn "Sync repo uses SSH but GitHub setup was declined — the clone will only work if this VM already has a key GitHub trusts."
+  fi
   echo ""
 
   echo -e "${BOLD}Optional Extras${NC}"
   echo "─────────────────────────────────────────────────"
-  echo "The base install above (languages, build tools, Claude Code itself) always runs."
-  echo "These are opinionated good-practice additions on top of it — decline any you don't want."
-  echo ""
-
-  read -rp "Install Docker Engine + Compose plugin? [Y/n]: " INSTALL_DOCKER
-  INSTALL_DOCKER="${INSTALL_DOCKER:-y}"
-
-  read -rp "Install the recommended Claude Code plugin bundle (frontend-design, code-review, commit-commands, security-guidance, context7, superpowers, deployment-engineer — plus docker/github plugins if you installed those above)? [Y/n]: " INSTALL_PLUGINS
-  INSTALL_PLUGINS="${INSTALL_PLUGINS:-y}"
-
-  read -rp "Install the webapp-testing skill + Playwright (browser-based UI testing for Claude Code)? [Y/n]: " INSTALL_WEBAPP_TESTING
-  INSTALL_WEBAPP_TESTING="${INSTALL_WEBAPP_TESTING:-y}"
+  ask_yn INSTALL_DOCKER "Install Docker Engine + Compose plugin?"
+  if $USE_SYNC; then
+    INSTALL_PLUGINS=false   # plugins come from the synced settings.json
+  else
+    ask_yn INSTALL_PLUGINS "Enable the recommended Claude Code plugin bundle (frontend-design, code-review, commit-commands, security-guidance, context7, superpowers, deployment-engineer, + docker if installed)?"
+  fi
+  ask_yn INSTALL_WEBAPP_TESTING "Install the webapp-testing skill + Playwright (browser-based UI testing)?"
+  ask_yn AUTO_UPDATE "Enable weekly unattended apt upgrades (Sunday 03:00)?"
   echo ""
 }
 
-# ── Provision ───────────────────────────────────────────────────────────────
-provision() {
-  export DEBIAN_FRONTEND=noninteractive
-
-  # Resilient apt installer: try the batch, then fall back to one-by-one so a
-  # single renamed/dropped package can't abort the whole run under `set -e`.
-  apt_install() {
-    if ! sudo apt-get install -y -qq "$@" >/dev/null 2>&1; then
-      echo "    [warn] batch install failed; retrying individually..."
-      local p
-      for p in "$@"; do
-        sudo apt-get install -y -qq "$p" >/dev/null 2>&1 || echo "    [warn] skipped (unavailable): $p"
-      done
-    fi
-  }
-
-  CURRENT_STEP="Generating locale (en_GB.UTF-8)"
-  echo ">>> Generating locale (en_GB.UTF-8)..."
+# ── System ─────────────────────────────────────────────────────────────────
+setup_locale() {
+  step "Configuring locale ($LOCALE)"
   sudo apt-get update -qq
-  apt_install locales
-  sudo sed -i '/en_GB.UTF-8/s/^# //g' /etc/locale.gen
-  sudo locale-gen en_GB.UTF-8 > /dev/null 2>&1
-  sudo update-locale LANG=en_GB.UTF-8 LC_ALL=en_GB.UTF-8
-  export LANG=en_GB.UTF-8
-  export LC_ALL=en_GB.UTF-8
+  apt_install_required locales
+  local normalised="${LOCALE,,}"; normalised="${normalised/utf-8/utf8}"
+  if locale -a 2>/dev/null | grep -qix "$normalised"; then
+    info "$LOCALE already generated."
+  else
+    sudo sed -i "s/^# *\(${LOCALE//./\\.} \)/\1/" /etc/locale.gen
+    sudo locale-gen "$LOCALE" >/dev/null
+  fi
+  # LANG only: a global LC_ALL overrides every per-category setting and is
+  # meant for one-off debugging, not as a system default.
+  sudo update-locale LANG="$LOCALE"
+  export LANG="$LOCALE"
+}
 
-  CURRENT_STEP="Updating system"
-  echo ">>> Updating system..."
-  sudo apt-get upgrade -y -qq
+install_packages() {
+  step "Updating system"
+  sudo apt-get -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold upgrade -y -qq >/dev/null
 
-  CURRENT_STEP="Installing core packages"
-  echo ">>> Installing core packages..."
+  step "Installing core packages"
+  apt_install_required git curl wget ca-certificates gnupg jq rsync
   apt_install \
-    git curl wget unzip zip \
-    ca-certificates gnupg lsb-release apt-transport-https software-properties-common \
-    bash-completion locales \
-    htop nano vim tmux screen \
-    jq yq tree \
+    unzip zip lsb-release software-properties-common \
+    bash-completion htop nano vim tmux screen \
+    yq tree \
     net-tools iproute2 iputils-ping bind9-dnsutils \
     cron logrotate
 
-  CURRENT_STEP="Installing build tools & dev libraries"
-  echo ">>> Installing build tools & dev libraries..."
+  step "Installing build tools & dev libraries"
   apt_install \
     build-essential make cmake pkg-config autoconf automake libtool \
     python3 python3-pip python3-venv python3-dev \
     libssl-dev libffi-dev libsqlite3-dev zlib1g-dev \
     libreadline-dev libbz2-dev libncurses-dev liblzma-dev libxml2-dev libxslt1-dev
 
-  CURRENT_STEP="Installing search & productivity tools"
-  echo ">>> Installing search & productivity tools..."
-  apt_install \
-    ripgrep fd-find fzf bat \
-    rsync \
-    sqlite3
+  step "Installing search, productivity & database tools"
+  apt_install ripgrep fd-find fzf bat sqlite3 postgresql-client redis-tools
+}
 
-  CURRENT_STEP="Installing database clients"
-  echo ">>> Installing database clients..."
-  apt_install \
-    postgresql-client redis-tools
-
-  CURRENT_STEP="Installing Node.js 22.x LTS"
-  echo ">>> Installing Node.js 22.x LTS..."
-  curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
-  sudo apt-get install -y -qq nodejs
+install_node() {
+  step "Installing Node.js ${NODE_MAJOR}.x"
+  local current=""
+  have node && current=$(node --version | sed 's/^v//; s/\..*//')
+  if [[ "$current" == "$NODE_MAJOR" ]]; then
+    info "Node.js $(node --version) already installed."
+  elif [[ -n "$current" && -z "$NODE_MAJOR_EXPLICIT" ]]; then
+    info "Keeping existing Node.js $(node --version) (set NODE_MAJOR=${NODE_MAJOR} to switch)."
+  else
+    curl -fsSL "https://deb.nodesource.com/setup_${NODE_MAJOR}.x" -o "$WORK_DIR/nodesource.sh"
+    sudo -E bash "$WORK_DIR/nodesource.sh" >/dev/null
+    apt_install_required nodejs
+  fi
   echo "    Node.js $(node --version) / npm $(npm --version)"
 
-  CURRENT_STEP="Installing global npm packages"
-  echo ">>> Installing global npm packages..."
-  sudo npm install -g typescript ts-node eslint prettier
-
-  CURRENT_STEP="Installing Go"
-  echo ">>> Installing Go..."
-  GO_VERSION=$(curl -fsSL "https://go.dev/VERSION?m=text" | head -1)
-  curl -fsSL "https://go.dev/dl/${GO_VERSION}.linux-amd64.tar.gz" -o /tmp/go.tar.gz
-  sudo rm -rf /usr/local/go
-  sudo tar -C /usr/local -xzf /tmp/go.tar.gz
-  rm /tmp/go.tar.gz
-  echo 'export PATH=$PATH:/usr/local/go/bin' | sudo tee /etc/profile.d/go.sh > /dev/null
-  echo "    Go $(/usr/local/go/bin/go version | awk '{print $3}')"
-
-  CURRENT_STEP="Installing Rust"
-  echo ">>> Installing Rust (as your user, no sudo needed)..."
-  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-  # shellcheck disable=SC1090
-  source "$HOME/.cargo/env"
-  echo "    Rust $(rustc --version | awk '{print $2}')"
-
-  if [[ "${INSTALL_DOCKER,,}" == y* ]]; then
-    CURRENT_STEP="Installing Docker"
-    echo ">>> Installing Docker..."
-    curl -fsSL https://get.docker.com | sudo sh
-    sudo systemctl enable docker
-    sudo apt-get install -y -qq docker-compose-plugin 2>/dev/null || true
-    echo "    Docker $(sudo docker --version | awk '{print $3}' | tr -d ',')"
-    echo "    Compose $(sudo docker compose version --short 2>/dev/null || echo 'included with Docker')"
-
-    CURRENT_STEP="Adding user to docker group"
-    echo ">>> Adding $USER to the docker group (run docker without sudo)..."
-    # get.docker.com's installer creates the docker group as part of installing
-    # docker-ce, but groupadd here is a harmless, idempotent safety net in case
-    # that ever changes or the group was removed some other way.
-    getent group docker >/dev/null 2>&1 || sudo groupadd docker
-    sudo usermod -aG docker "$USER"
-    if groups | grep -qw docker; then
-      info "docker group already active in this session."
-    else
-      warn "You must log out and back in (or run 'newgrp docker') before 'docker' works without sudo."
-    fi
-  else
-    info "Skipping Docker (declined)."
+  # User-owned global prefix: `npm install -g` then works without sudo, which
+  # claude-config-sync's npm-tools.sh (and Claude itself) rely on.
+  if [[ ! -w "$(npm config get prefix)" ]]; then
+    npm config set prefix "$HOME/.npm-global"
+    info "npm global prefix set to ~/.npm-global (no sudo needed for npm -g)."
   fi
+  PATH="$(npm config get prefix)/bin:$PATH"; export PATH
 
-  CURRENT_STEP="Setting up Git identity"
-  echo ">>> Setting up Git identity..."
+  step "Installing global npm packages"
+  local pkgs=(typescript ts-node eslint prettier) missing=() p
+  for p in "${pkgs[@]}"; do
+    npm ls -g --depth=0 "$p" >/dev/null 2>&1 || missing+=("$p")
+  done
+  if [[ ${#missing[@]} -gt 0 ]]; then
+    npm install -g --no-fund --no-audit "${missing[@]}"
+  else
+    info "All present: ${pkgs[*]}"
+  fi
+}
+
+install_go() {
+  step "Installing Go"
+  local go_arch
+  case "$DPKG_ARCH" in
+    amd64|arm64) go_arch="$DPKG_ARCH" ;;
+    armhf)       go_arch="armv6l" ;;
+    i386)        go_arch="386" ;;
+    *) warn "No official Go build for $DPKG_ARCH — skipping Go."; return 0 ;;
+  esac
+
+  # go.dev's JSON index gives the latest stable release *and* its sha256, so
+  # the tarball is verified rather than trusted blindly.
+  local index version sha file current=""
+  index=$(curl -fsSL "https://go.dev/dl/?mode=json")
+  version=$(jq -r '.[0].version' <<<"$index")
+  file=$(jq -r --arg a "$go_arch" '.[0].files[] | select(.os=="linux" and .arch==$a and .kind=="archive") | .filename' <<<"$index")
+  sha=$(jq -r --arg a "$go_arch" '.[0].files[] | select(.os=="linux" and .arch==$a and .kind=="archive") | .sha256' <<<"$index")
+  [[ -x /usr/local/go/bin/go ]] && current=$(/usr/local/go/bin/go version | awk '{print $3}')
+
+  if [[ "$current" == "$version" ]]; then
+    info "Go $version already installed."
+  else
+    [[ -n "$file" && -n "$sha" ]] || error "Could not find a Go $version download for linux/$go_arch."
+    curl -fsSL "https://go.dev/dl/$file" -o "$WORK_DIR/$file"
+    echo "$sha  $WORK_DIR/$file" | sha256sum -c --quiet - || error "Go tarball checksum mismatch — refusing to install."
+    sudo rm -rf /usr/local/go
+    sudo tar -C /usr/local -xzf "$WORK_DIR/$file"
+    # shellcheck disable=SC2016 # expanded at login, not now
+    echo 'export PATH=$PATH:/usr/local/go/bin' | sudo tee /etc/profile.d/go.sh >/dev/null
+  fi
+  echo "    Go $(/usr/local/go/bin/go version | awk '{print $3}')"
+}
+
+install_rust() {
+  step "Installing Rust (as your user)"
+  local rustup_bin
+  rustup_bin=$(command -v rustup || echo "$HOME/.cargo/bin/rustup")
+  if [[ -x "$rustup_bin" ]]; then
+    "$rustup_bin" update stable --no-self-update >/dev/null 2>&1 || warn "rustup update failed; keeping current toolchain."
+  else
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs -o "$WORK_DIR/rustup.sh"
+    sh "$WORK_DIR/rustup.sh" -y -q
+  fi
+  # shellcheck disable=SC1091
+  [[ -f "$HOME/.cargo/env" ]] && source "$HOME/.cargo/env"
+  echo "    Rust $(rustc --version | awk '{print $2}')"
+}
+
+install_docker() {
+  is_true "$INSTALL_DOCKER" || { info "Skipping Docker (declined)."; return 0; }
+  step "Installing Docker"
+  if have docker; then
+    info "Docker already installed."
+  else
+    curl -fsSL https://get.docker.com -o "$WORK_DIR/get-docker.sh"
+    sudo sh "$WORK_DIR/get-docker.sh" >/dev/null
+    sudo systemctl enable --now docker || warn "Could not enable the docker service (no systemd?)."
+  fi
+  echo "    Docker $(sudo docker --version | awk '{print $3}' | tr -d ',')"
+  echo "    Compose $(sudo docker compose version --short 2>/dev/null || echo 'missing')"
+
+  getent group docker >/dev/null 2>&1 || sudo groupadd docker
+  if id -nG "$USER" | grep -qw docker; then
+    info "$USER is already in the docker group."
+  else
+    sudo usermod -aG docker "$USER"
+    warn "Log out and back in (or run 'newgrp docker') before 'docker' works without sudo."
+  fi
+}
+
+# ── Git / GitHub ───────────────────────────────────────────────────────────
+setup_git() {
+  step "Setting up Git identity"
   git config --global user.name "$GIT_NAME"
   git config --global user.email "$GIT_EMAIL"
-  git config --global init.defaultBranch main
-  git config --global core.editor nano
-  git config --global pull.rebase false
+  # Defaults only — never override choices already made on this machine.
+  local kv
+  for kv in init.defaultBranch=main core.editor=nano pull.rebase=false; do
+    git config --global --get "${kv%%=*}" >/dev/null || git config --global "${kv%%=*}" "${kv#*=}"
+  done
+}
 
-  GITHUB_SSH_KEY="$HOME/.ssh/id_ed25519"
-  if [[ "${SETUP_GITHUB,,}" == "y" || "${SETUP_GITHUB,,}" == "yes" ]]; then
-    CURRENT_STEP="Installing GitHub CLI (gh)"
-    echo ">>> Installing GitHub CLI (gh)..."
-    sudo mkdir -p -m 755 /etc/apt/keyrings
-    curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo tee /etc/apt/keyrings/githubcli-archive-keyring.gpg > /dev/null
-    sudo chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg
-    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null
-    sudo apt-get update -qq
-    apt_install gh
-    echo "    gh $(gh --version | head -1 | awk '{print $3}')"
+setup_github() {
+  is_true "$SETUP_GITHUB" || { info "Skipping GitHub CLI + SSH/auth setup (declined)."; return 0; }
 
-    CURRENT_STEP="Setting up SSH key for GitHub"
-    echo ">>> Setting up SSH key for GitHub..."
-    mkdir -p "$HOME/.ssh" && chmod 700 "$HOME/.ssh"
-    if [[ ! -f "$GITHUB_SSH_KEY" ]]; then
-      ssh-keygen -t ed25519 -C "$GIT_EMAIL" -f "$GITHUB_SSH_KEY" -N ""
-    else
-      info "SSH key already exists at $GITHUB_SSH_KEY, reusing it."
-    fi
-    eval "$(ssh-agent -s)" > /dev/null
-    ssh-add "$GITHUB_SSH_KEY" 2>/dev/null || true
-    grep -q "github.com" "$HOME/.ssh/known_hosts" 2>/dev/null || ssh-keyscan -t ed25519 github.com >> "$HOME/.ssh/known_hosts" 2>/dev/null
-
-    echo ""
-    echo -e "${BOLD}Your public key (add this at https://github.com/settings/keys if 'gh auth login' doesn't do it for you):${NC}"
-    cat "${GITHUB_SSH_KEY}.pub"
-    echo ""
-
-    if gh auth status -h github.com >/dev/null 2>&1; then
-      info "gh is already authenticated (gh auth status OK) — skipping gh auth login."
-    else
-      CURRENT_STEP="Running gh auth login"
-      echo ">>> Running 'gh auth login' (interactive — follow the browser/device-code prompts)..."
-      gh auth login -h github.com || warn "gh auth login did not complete; run it again later with: gh auth login"
-    fi
-    gh auth setup-git 2>/dev/null || true
+  step "Installing GitHub CLI (gh)"
+  if have gh; then
+    info "gh already installed."
   else
-    info "Skipping GitHub CLI + SSH/auth setup (declined). Re-run this script section later, or install gh manually."
+    sudo install -d -m 0755 /etc/apt/keyrings
+    curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+      | sudo tee /etc/apt/keyrings/githubcli-archive-keyring.gpg >/dev/null
+    sudo chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg
+    echo "deb [arch=${DPKG_ARCH} signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+      | sudo tee /etc/apt/sources.list.d/github-cli.list >/dev/null
+    sudo apt-get update -qq
+    apt_install_required gh
+  fi
+  echo "    gh $(gh --version | head -1 | awk '{print $3}')"
+
+  step "Setting up SSH key for GitHub"
+  local key="$HOME/.ssh/id_ed25519"
+  install -d -m 700 "$HOME/.ssh"
+  if [[ -f "$key" ]]; then
+    info "Reusing existing SSH key at $key."
+  else
+    ssh-keygen -q -t ed25519 -C "$GIT_EMAIL" -f "$key" -N ""
+  fi
+  # Pin github.com's host keys from its HTTPS API (authenticated by TLS)
+  # rather than trusting whatever ssh-keyscan happens to be told.
+  if ssh-keygen -F github.com >/dev/null 2>&1; then
+    info "github.com host key already in known_hosts."
+  elif curl -fsSL https://api.github.com/meta | jq -er '.ssh_keys[] | "github.com " + .' >> "$HOME/.ssh/known_hosts"; then
+    info "Pinned github.com host keys from api.github.com/meta."
+  else
+    warn "Could not fetch GitHub's published host keys; falling back to ssh-keyscan."
+    ssh-keyscan -t ed25519 github.com >> "$HOME/.ssh/known_hosts" 2>/dev/null
   fi
 
-  CURRENT_STEP="Installing Claude Code (apt)"
-  echo ">>> Installing Claude Code (via Anthropic's signed apt repo)..."
-  # Uses Anthropic's official apt repo rather than the curl|bash native
-  # installer: same underlying binary, but plain apt-managed updates
-  # (sudo apt update && sudo apt upgrade claude-code) instead of a
-  # self-updating background process, and gpg-verified end to end.
-  CLAUDE_APT_KEYRING="/etc/apt/keyrings/claude-code.asc"
-  sudo install -d -m 0755 /etc/apt/keyrings
-  sudo curl -fsSL https://downloads.claude.ai/keys/claude-code.asc -o "$CLAUDE_APT_KEYRING"
-  CLAUDE_KEY_FPR=$(gpg --show-keys --with-colons "$CLAUDE_APT_KEYRING" 2>/dev/null | awk -F: '/^fpr:/ { print $10; exit }')
-  if [[ "$CLAUDE_KEY_FPR" != "31DDDE24DDFAB679F42D7BD2BAA929FF1A7ECACE" ]]; then
-    error "Claude Code apt signing key fingerprint mismatch (got: ${CLAUDE_KEY_FPR:-none}, expected 31DDDE24DDFAB679F42D7BD2BAA929FF1A7ECACE) - refusing to trust it. See https://code.claude.com/docs/en/setup#install-with-linux-package-managers"
+  if gh auth status -h github.com >/dev/null 2>&1; then
+    info "gh is already authenticated — skipping gh auth login."
+  elif [[ -t 0 ]]; then
+    step "Running 'gh auth login' (interactive — follow the browser/device-code prompts)"
+    # -p ssh makes gh offer to upload the key generated above.
+    gh auth login -h github.com -p ssh || warn "gh auth login did not complete; run it later with: gh auth login -p ssh"
+  else
+    warn "No terminal attached — skipping gh auth login. Run it later with: gh auth login -p ssh"
   fi
-  echo "deb [signed-by=${CLAUDE_APT_KEYRING}] https://downloads.claude.ai/claude-code/apt/stable stable main" | sudo tee /etc/apt/sources.list.d/claude-code.list > /dev/null
-  sudo apt-get update -qq
-  apt_install claude-code
+
+  if gh auth status -h github.com >/dev/null 2>&1; then
+    gh auth setup-git >/dev/null 2>&1 || true
+    # Make sure the key is actually registered (covers re-runs, and logins
+    # where the upload prompt was skipped). Needs the public_key scopes, so
+    # this is best-effort.
+    local pub; pub=$(awk '{print $1" "$2}' "$key.pub")
+    if gh api user/keys --jq '.[].key' 2>/dev/null | grep -qxF "$pub"; then
+      info "SSH key is registered with GitHub."
+    elif gh ssh-key add "$key.pub" --title "$(hostname) (claude-code-vm-setup)" >/dev/null 2>&1; then
+      success "Uploaded SSH key to GitHub."
+    else
+      echo -e "${BOLD}Add this public key at https://github.com/settings/keys (or: gh auth refresh -s admin:public_key && gh ssh-key add $key.pub):${NC}"
+      cat "$key.pub"
+    fi
+  fi
+}
+
+# ── Claude Code ────────────────────────────────────────────────────────────
+install_claude_code() {
+  step "Installing Claude Code"
+  # The native installer puts claude in ~/.local/bin, which a fresh VM's
+  # shell may not have on PATH yet — without this, re-runs reinstall it.
+  export PATH="$HOME/.local/bin:$PATH"
+  local existing=""
+  have claude && existing=$(readlink -f "$(command -v claude)")
+
+  # Don't stack a second install on top of one made by the other method —
+  # whichever comes first on PATH would silently shadow the other.
+  if [[ -n "$existing" ]] && ! dpkg -S "$existing" >/dev/null 2>&1; then
+    info "Claude Code is already installed natively ($existing); it self-updates, so apt is skipped."
+    CLAUDE_INSTALL_METHOD="native"
+  elif [[ -z "$existing" && "$CLAUDE_INSTALL_METHOD" == "native" ]]; then
+    curl -fsSL https://claude.ai/install.sh -o "$WORK_DIR/claude-install.sh"
+    bash "$WORK_DIR/claude-install.sh"
+  else
+    CLAUDE_INSTALL_METHOD="apt"
+    # Anthropic's signed apt repo: same binary as the native installer, but
+    # updated by apt (including the weekly cron below) instead of in-process.
+    local keyring="/etc/apt/keyrings/claude-code.asc" fpr
+    sudo install -d -m 0755 /etc/apt/keyrings
+    sudo curl -fsSL https://downloads.claude.ai/keys/claude-code.asc -o "$keyring"
+    fpr=$(gpg --show-keys --with-colons "$keyring" 2>/dev/null | awk -F: '/^fpr:/ { print $10; exit }')
+    if [[ "$fpr" != "$CLAUDE_APT_KEY_FPR" ]]; then
+      sudo rm -f "$keyring"
+      error "Claude Code apt signing key fingerprint mismatch (got: ${fpr:-none}, expected $CLAUDE_APT_KEY_FPR) - refusing to trust it. See https://code.claude.com/docs/en/setup#install-with-linux-package-managers"
+    fi
+    echo "deb [signed-by=${keyring}] https://downloads.claude.ai/claude-code/apt/stable stable main" \
+      | sudo tee /etc/apt/sources.list.d/claude-code.list >/dev/null
+    sudo apt-get update -qq
+    apt_install_required claude-code
+  fi
   echo "    Claude Code $(claude --version 2>/dev/null || echo 'installed')"
+}
 
-  CURRENT_STEP="Configuring Claude Code permissions + plugins"
-  echo ">>> Configuring Claude Code permissions + plugins..."
+# Option a) claude-config-sync owns ~/.claude — clone the user's sync repo and
+# hand over to its install.sh (bootstrap on first run, sync afterwards). It
+# also provisions gh and its companion npm tools.
+setup_config_sync() {
+  step "Applying Claude Code config from claude-config-sync"
+  if [[ ! -d "$CLAUDE_SYNC_REPO_DIR/.git" ]]; then
+    git clone -q "$CLAUDE_SYNC_REPO_URL" "$CLAUDE_SYNC_REPO_DIR" || {
+      warn "Could not clone $CLAUDE_SYNC_REPO_URL — check the URL and that this VM has access (SSH key registered / gh authenticated)."
+      SYNC_FAILED=true; return 0
+    }
+  fi
+  if [[ ! -x "$CLAUDE_SYNC_REPO_DIR/install.sh" ]]; then
+    warn "$CLAUDE_SYNC_REPO_DIR has no install.sh — is it a claude-config-sync repo?"
+    SYNC_FAILED=true; return 0
+  fi
+  export CLAUDE_SYNC_REPO_URL CLAUDE_SYNC_REPO_DIR CLAUDE_SYNC_PROJECT_PATH="$PROJECT_DIR"
+  if "$CLAUDE_SYNC_REPO_DIR/install.sh"; then
+    success "Config synced from $CLAUDE_SYNC_REPO_URL."
+  else
+    warn "claude-config-sync install failed. Fix it, then run: $CLAUDE_SYNC_REPO_DIR/install.sh (or claude-sync.sh doctor)"
+    SYNC_FAILED=true
+  fi
+}
+
+# Option b) no sync repo — merge a baseline into ~/.claude/settings.json.
+# Existing keys win, so re-runs never undo changes made since.
+setup_local_config() {
+  step "Configuring Claude Code settings (local)"
+  local settings="$HOME/.claude/settings.json" plugins='{}' markets='{}' tmp
   mkdir -p "$HOME/.claude"
 
-  # Base settings.json: just enough to avoid permission prompts. No personal
-  # opinions baked in here (no plugins, no env tuning) — those are opt-in below.
-  cat > "$HOME/.claude/settings.json" << 'SETTINGS'
-{
-  "$schema": "https://json.schemastore.org/claude-code-settings.json",
-  "permissions": {
-    "allow": [
-      "Bash(*)",
-      "Read(*)",
-      "Write(*)",
-      "Edit(*)",
-      "MultiEdit(*)",
-      "WebFetch(*)",
-      "WebSearch(*)",
-      "TodoRead(*)",
-      "TodoWrite(*)",
-      "Grep(*)",
-      "Glob(*)",
-      "LS(*)",
-      "Task(*)",
-      "mcp__*"
-    ]
-  }
-}
-SETTINGS
-
-  if [[ "${INSTALL_PLUGINS,,}" == y* ]]; then
-    echo "    Adding recommended plugin bundle to settings.json..."
-    # claude-plugins-official is built into every Claude Code install, so its
-    # plugins need no marketplace declaration. Third-party marketplaces
-    # (superpowers, awesome-claude-code-plugins) must be declared in
-    # extraKnownMarketplaces. docker/github plugins are only added if the
-    # matching tool was actually installed above.
-    PLUGIN_JSON='{
+  if is_true "$INSTALL_PLUGINS"; then
+    # claude-plugins-official is built in; third-party marketplaces must be
+    # declared. No github plugin: gh CLI covers the same ground without the
+    # MCP server's separate token setup.
+    plugins='{
       "frontend-design@claude-plugins-official": true,
       "code-review@claude-plugins-official": true,
       "commit-commands@claude-plugins-official": true,
@@ -374,226 +571,218 @@ SETTINGS
       "superpowers@superpowers-marketplace": true,
       "deployment-engineer@awesome-claude-code-plugins": true
     }'
-    [[ "${INSTALL_DOCKER,,}" == y* ]] && PLUGIN_JSON=$(jq '. + {"docker@claude-plugins-official": true}' <<< "$PLUGIN_JSON")
-    [[ "${SETUP_GITHUB,,}" == y* ]] && PLUGIN_JSON=$(jq '. + {"github@claude-plugins-official": true}' <<< "$PLUGIN_JSON")
+    is_true "$INSTALL_DOCKER" && plugins=$(jq '. + {"docker@claude-plugins-official": true}' <<<"$plugins")
+    markets='{
+      "superpowers-marketplace":     { "source": { "source": "github", "repo": "obra/superpowers-marketplace" } },
+      "awesome-claude-code-plugins": { "source": { "source": "github", "repo": "ccplugins/awesome-claude-code-plugins" } }
+    }'
+  fi
 
-    tmp=$(mktemp)
-    jq --argjson plugins "$PLUGIN_JSON" '
-      .extraKnownMarketplaces = {
-        "superpowers-marketplace": { "source": { "source": "github", "repo": "obra/superpowers-marketplace" } },
-        "awesome-claude-code-plugins": { "source": { "source": "github", "repo": "ccplugins/awesome-claude-code-plugins" } }
-      } | .enabledPlugins = $plugins
-    ' "$HOME/.claude/settings.json" > "$tmp" && mv "$tmp" "$HOME/.claude/settings.json"
+  if [[ -f "$settings" ]] && ! jq -e . "$settings" >/dev/null 2>&1; then
+    warn "$settings is not valid JSON — moving it to $settings.invalid and starting fresh."
+    mv "$settings" "$settings.invalid"
+  fi
+  [[ -f "$settings" ]] || echo '{}' > "$settings"
+
+  tmp=$(mktemp -p "$WORK_DIR")
+  jq --argjson plugins "$plugins" --argjson markets "$markets" '
+    {"$schema": "https://json.schemastore.org/claude-code-settings.json"} + .
+    | .permissions.allow = ((.permissions.allow // []) + [
+        "Bash(*)", "Read(*)", "Write(*)", "Edit(*)", "MultiEdit(*)",
+        "WebFetch(*)", "WebSearch(*)", "TodoRead(*)", "TodoWrite(*)",
+        "Grep(*)", "Glob(*)", "LS(*)", "Task(*)", "mcp__*"
+      ] | unique)
+    | if $plugins == {} then . else
+        .enabledPlugins = ($plugins + (.enabledPlugins // {}))
+        | .extraKnownMarketplaces = ($markets + (.extraKnownMarketplaces // {}))
+      end
+  ' "$settings" > "$tmp"
+
+  if cmp -s "$tmp" "$settings"; then
+    info "settings.json already up to date."
   else
-    info "Skipping recommended plugin bundle (declined)."
+    cp "$settings" "$settings.bak"
+    cat "$tmp" > "$settings"
+    success "Updated $settings (previous version at settings.json.bak)."
   fi
+}
 
-  CURRENT_STEP="Enabling Claude Code Remote Control auto-start"
-  echo ">>> Enabling Claude Code Remote Control auto-start..."
-  # The CLI auto-starts a phone/browser-controllable session when
-  # remoteControlAtStartup=true in ~/.claude.json (connect from claude.ai/code or
-  # the Claude mobile app). settings.json has no documented key for this; the
-  # in-app equivalent is the /config toggle. Requires a Pro/Max login
-  # (run: claude /login) — API keys are NOT supported for Remote Control.
-  if command -v jq >/dev/null 2>&1; then
-    if [[ -f "$HOME/.claude.json" ]]; then
-      tmp=$(mktemp); jq '.remoteControlAtStartup = true' "$HOME/.claude.json" > "$tmp" && mv "$tmp" "$HOME/.claude.json"
-    else
-      echo '{ "remoteControlAtStartup": true }' > "$HOME/.claude.json"
-    fi
+enable_remote_control() {
+  step "Enabling Claude Code Remote Control auto-start"
+  # remoteControlAtStartup in ~/.claude.json is the /config toggle "Enable
+  # Remote Control for all sessions". Requires a Pro/Max login (claude, then
+  # /login) — API keys are NOT supported for Remote Control.
+  local cfg="$HOME/.claude.json" tmp
+  [[ -f "$cfg" ]] || echo '{}' > "$cfg"
+  if ! jq -e . "$cfg" >/dev/null 2>&1; then
+    warn "$cfg isn't valid JSON — not touching it (it holds login state). Enable Remote Control via /config instead."
+    return 0
+  fi
+  tmp=$(mktemp -p "$WORK_DIR")
+  jq '.remoteControlAtStartup = true' "$cfg" > "$tmp" && cat "$tmp" > "$cfg"
+}
+
+install_webapp_testing() {
+  is_true "$INSTALL_WEBAPP_TESTING" || { info "Skipping webapp-testing skill + Playwright (declined)."; return 0; }
+
+  step "Installing webapp-testing skill (from anthropics/skills)"
+  local dest="$HOME/.claude/skills/webapp-testing" src="$WORK_DIR/anthropic-skills"
+  if [[ -L "$dest" ]]; then
+    info "$dest is a symlink (managed elsewhere, e.g. claude-config-sync) — leaving it alone."
   else
-    echo "    [warn] jq missing; skipping remote-control auto-start (enable later via /config)."
+    git clone -q --depth 1 --filter=blob:none --sparse https://github.com/anthropics/skills.git "$src"
+    git -C "$src" sparse-checkout set skills/webapp-testing
+    mkdir -p "$dest"
+    rsync -a --delete "$src/skills/webapp-testing/" "$dest/"
   fi
 
-  CURRENT_STEP="Setting up ~/project directory"
-  echo ">>> Setting up ~/project directory..."
-  mkdir -p "$HOME/project"
+  # The skill drives Playwright from Python scripts, so it needs the Python
+  # package — the npm one alone leaves it broken.
+  step "Installing Playwright (Python) + Chromium"
+  python3 -m pip install --user --break-system-packages --quiet --upgrade playwright
+  python3 -m playwright install --with-deps chromium
+}
 
-  DOCKER_TOOLS_LINE=""
-  DOCKER_USAGE_SECTION=""
-  if [[ "${INSTALL_DOCKER,,}" == y* ]]; then
-    DOCKER_TOOLS_LINE="- **Docker**: Docker Engine + Compose plugin installed (\`$USER\` is in the \`docker\` group; no containers deployed by default)"
-    DOCKER_USAGE_SECTION="
-## Docker Usage
-Docker and the Compose plugin are installed but no services are deployed by default. Log out and
-back in (or run \`newgrp docker\`) so group membership takes effect, then \`docker run hello-world\`
-to verify.
-"
+# ── Workspace ──────────────────────────────────────────────────────────────
+write_project_claude_md() {
+  step "Writing $PROJECT_DIR/CLAUDE.md"
+  mkdir -p "$PROJECT_DIR"
+  local file="$PROJECT_DIR/CLAUDE.md"
+  local begin="<!-- >>> claude-code-vm-setup (generated; edits inside this block are overwritten on re-run) >>> -->"
+  local end="<!-- <<< claude-code-vm-setup <<< -->"
+
+  # CLAUDE.md written by older versions of this script had no markers; back
+  # it up and replace it rather than appending a second copy.
+  if [[ -f "$file" ]] && ! grep -qF "$end" "$file" && head -1 "$file" | grep -q '^# Claude Code Workspace'; then
+    mv "$file" "$file.bak"
+    info "Replaced pre-marker CLAUDE.md (old copy at CLAUDE.md.bak)."
   fi
 
-  GITHUB_ACCESS_SECTION=""
-  if [[ "${SETUP_GITHUB,,}" == y* ]]; then
-    GITHUB_ACCESS_SECTION="
+  local body sections="" docker_plugin=""
+  is_true "$INSTALL_DOCKER" && docker_plugin=", docker"
+  if is_true "$INSTALL_DOCKER"; then
+    sections+="
+## Docker
+Docker Engine + Compose plugin are installed (\`$USER\` is in the \`docker\` group); no containers
+are deployed by default."
+  fi
+  if is_true "$SETUP_GITHUB"; then
+    sections+="
 ## GitHub Access
-- **gh CLI** is installed; auth was configured via \`gh auth login\` during setup (re-run any time).
-- **SSH key**: ~/.ssh/id_ed25519(.pub) — add the public half at https://github.com/settings/keys
-  if it isn't already linked via \`gh\`. github.com's host key is pre-seeded in ~/.ssh/known_hosts.
-- Verify with: \`gh auth status\` and \`ssh -T git@github.com\`.
-- Clone with either \`gh repo clone owner/repo\` or standard \`git clone git@github.com:owner/repo.git\`.
-"
+- **gh CLI** is installed and authenticated via \`gh auth login\` (verify: \`gh auth status\`).
+  Prefer \`gh\` for issues/PRs/Actions.
+- **SSH key**: ~/.ssh/id_ed25519 (verify: \`ssh -T git@github.com\`)."
+  fi
+  if $USE_SYNC; then
+    sections+="
+## Claude Code Config
+Global config (~/.claude/CLAUDE.md, settings.json, hooks, skills, plugins, memory) is managed by
+claude-config-sync from \`$CLAUDE_SYNC_REPO_URL\` (clone: $CLAUDE_SYNC_REPO_DIR) and synced on
+session start/end. Change it there, not by hand-editing ~/.claude."
+  elif is_true "$INSTALL_PLUGINS"; then
+    sections+="
+## Plugins
+Declared in ~/.claude/settings.json and installed on first launch (check with /plugin):
+frontend-design, code-review, commit-commands, security-guidance, context7, superpowers,
+deployment-engineer${docker_plugin}."
+  fi
+  if is_true "$INSTALL_WEBAPP_TESTING"; then
+    sections+="
+## Skills
+- **webapp-testing** (~/.claude/skills/): Python Playwright browser testing for UI verification."
   fi
 
-  PLUGINS_SECTION=""
-  if [[ "${INSTALL_PLUGINS,,}" == y* ]]; then
-    PLUGINS_SECTION="
-## Installed Plugins
-Declared in ~/.claude/settings.json and installed from their marketplaces on first launch.
-Run /plugin to confirm they're active or add more.
-- **frontend-design** (claude-plugins-official): production-grade UI aesthetics
-- **code-review** (claude-plugins-official): multi-agent PR review with confidence scoring
-- **commit-commands** (claude-plugins-official): git commit/push/PR workflows (/commit, /push, /pr)
-- **security-guidance** (claude-plugins-official): warnings when editing sensitive files
-- **context7** (claude-plugins-official): live, version-specific library docs (reduces API hallucinations)
-- **superpowers** (superpowers-marketplace): brainstorm → plan → implement (TDD) workflow
-  - /superpowers:brainstorm, /superpowers:write-plan, /superpowers:execute-plan
-  - Auto-activating skills: test-driven-development, systematic-debugging, verification-before-completion
-- **deployment-engineer** (awesome-claude-code-plugins, community): CI/CD pipelines, Docker,
-  cloud/Kubernetes deployment workflows"
-    [[ "${INSTALL_DOCKER,,}" == y* ]] && PLUGINS_SECTION="${PLUGINS_SECTION}
-- **docker** (claude-plugins-official): build images, manage containers/Compose, container networking"
-    [[ "${SETUP_GITHUB,,}" == y* ]] && PLUGINS_SECTION="${PLUGINS_SECTION}
-- **github** (claude-plugins-official): issues, PRs, code review, repo search, Actions"
-    PLUGINS_SECTION="${PLUGINS_SECTION}
-"
-  fi
-
-  SKILLS_SECTION=""
-  if [[ "${INSTALL_WEBAPP_TESTING,,}" == y* ]]; then
-    SKILLS_SECTION="
-## Installed Skills
-- **webapp-testing** (~/.claude/skills/): Playwright-based browser testing for UI verification
-"
-  fi
-
-  cat > "$HOME/project/CLAUDE.md" << CLAUDEMD
-# Claude Code Workspace
+  body="# Claude Code Workspace
 
 ## Environment
-- **OS**: Ubuntu 24.04 VM
-- **Working directory**: $HOME/project
+- **OS**: ${PRETTY_NAME:-Ubuntu} VM ($DPKG_ARCH)
+- **Working directory**: $PROJECT_DIR
 - **User**: $USER (sudo-capable, not root)
-- **Locale**: en_GB.UTF-8
-- **Shell**: environment (PATH, aliases, cargo env, project auto-cd) is configured in both
-  ~/.bashrc and ~/.zshrc (if zsh is installed)
+- **Locale**: $LOCALE
 
 ## Available Tools
-- **Languages**: Node.js 22 LTS, Python 3 (system default), Go (latest), Rust (latest)
+- **Languages**: Node.js $(ver 1 node --version), Python $(ver 2 python3 --version), Go $(ver 3 /usr/local/go/bin/go version), Rust $(ver 2 rustc --version)
 - **Package managers**: npm, pip (use --break-system-packages), cargo, go install
-$DOCKER_TOOLS_LINE
 - **Search tools**: ripgrep (rg), fd-find (fdfind), fzf
 - **Databases**: PostgreSQL client (psql), Redis client (redis-cli), SQLite3
+${sections}
 
-## Permissions
-All tools are pre-approved — no permission prompts. Bash, Read, Write, Edit, WebFetch, WebSearch, Task, and MCP tools all run without confirmation.
+## Remote Control
+Auto-start is on (remoteControlAtStartup in ~/.claude.json). Needs a Pro/Max login. Run
+\`claude\` in $PROJECT_DIR (or \`claude remote-control\` for multi-session server mode), then pick
+this machine's session in Claude Desktop or claude.ai/code. Outbound HTTPS only; the local
+\`claude\` process must stay running.
 
-## Subagents
-Define reusable ones as Markdown files in ~/.claude/agents/ (see /agents). tmux is installed for
-split-pane visualization if you're running several at once. Agent teams are an opt-in feature
-(CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 in ~/.claude/settings.json env) — not enabled by default
-by this setup; add it yourself if you want teammates that share findings and coordinate rather
-than just report back.
-
-## Remote Control (drive this VM from Claude Desktop on Windows)
-Auto-start is configured (remoteControlAtStartup in ~/.claude.json), which corresponds to the
-**Enable Remote Control for all sessions** setting (/config, or Settings → Claude Code → Enable
-remote control by default in Claude Desktop). Requires a Pro/Max login — run \`claude\` then
-\`/login\` on this VM first (API keys are not supported for Remote Control).
-
-To connect from the Windows Claude Desktop app:
-1. On this VM: \`cd ~/project && claude\` (or \`claude remote-control\` for server mode, which
-   supports multiple concurrent sessions and shows a QR code).
-2. In Claude Desktop on Windows: open Settings → Claude Code, confirm remote control is enabled,
-   then find this machine's session in the session list (or open claude.ai/code in a browser).
-3. The connection is outbound-HTTPS only from this VM — no inbound firewall/port-forwarding is
-   needed on the VM or your router.
-4. The local \`claude\` process must keep running for the remote session to stay connected.
-
-$GITHUB_ACCESS_SECTION
-$DOCKER_USAGE_SECTION
 ## Conventions
-- Prefer creating files over printing long code blocks
-- Use git for version control on all projects in $HOME/project/
-- When installing Python packages, use: pip install --break-system-packages <package>
-$PLUGINS_SECTION
-$SKILLS_SECTION
-CLAUDEMD
+- Use git for version control on all projects in $PROJECT_DIR/
+- When installing Python packages, use: pip install --break-system-packages <package>"
 
-  if [[ "${INSTALL_WEBAPP_TESTING,,}" == y* ]]; then
-    CURRENT_STEP="Installing webapp-testing skill"
-    echo ">>> Installing webapp-testing skill (from anthropics/skills)..."
-    rm -rf /tmp/anthropic-skills
-    git clone --depth 1 --filter=blob:none --sparse https://github.com/anthropics/skills.git /tmp/anthropic-skills
-    (cd /tmp/anthropic-skills && git sparse-checkout set skills/webapp-testing)
-    mkdir -p "$HOME/.claude/skills/"
-    rm -rf "$HOME/.claude/skills/webapp-testing"
-    cp -r /tmp/anthropic-skills/skills/webapp-testing "$HOME/.claude/skills/webapp-testing"
-    rm -rf /tmp/anthropic-skills
+  write_managed_block "$file" "$begin" "$end" "$body"
+}
 
-    CURRENT_STEP="Installing Playwright"
-    echo ">>> Installing Playwright for webapp-testing skill..."
-    npx -y playwright install --with-deps chromium
-  else
-    info "Skipping webapp-testing skill + Playwright (declined)."
-  fi
-
-  CURRENT_STEP="Setting up shell environment"
-  echo ">>> Setting up shell environment (bash + zsh if present)..."
-  # Quoted heredoc: nothing here is expanded now — $HOME, $PATH, etc. stay
-  # literal and get evaluated later, when each rc file is actually sourced.
-  RC_BLOCK=$(cat <<'RCBLOCK'
-
-# ── Claude Code Environment ──────────────────────────────────
+setup_shell() {
+  step "Setting up shell environment (bash + zsh if present)"
+  local begin="# >>> claude-code-vm-setup >>>" end="# <<< claude-code-vm-setup <<<" block rc tmp
+  # Quoted heredoc: $HOME, $PATH etc. stay literal and expand when the rc file
+  # is sourced; @PLACEHOLDERS@ are filled in below.
+  block=$(cat <<'RCBLOCK'
 export EDITOR=nano
-export LANG=en_GB.UTF-8
-export PATH="$HOME/.local/bin:$HOME/.claude/bin:$HOME/.cargo/bin:/usr/local/go/bin:$PATH"
+export LANG=@LOCALE@
+export PATH="$HOME/.local/bin:$HOME/.npm-global/bin:$HOME/.cargo/bin:/usr/local/go/bin:$PATH"
+[ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
 
-# Rust/Cargo (rustup normally wires this into shell profiles itself, but this
-# makes it explicit and safe to re-source even if that ever doesn't happen)
-[ -f "$HOME/.cargo/env" ] && source "$HOME/.cargo/env"
-
-# Aliases
 alias ll="ls -lah --color=auto"
 alias cls="clear"
 alias ..="cd .."
 alias ...="cd ../.."
 alias gs="git status"
 alias gl="git log --oneline -20"
-alias dc="docker compose"
-alias dps="docker ps --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}'"
-
-# Start in ~/project on login (only for interactive login shells, so it
-# doesn't hijack 'cd' in scripts or non-interactive sessions)
-[[ $- == *i* ]] && cd "$HOME/project" 2>/dev/null || true
+@DOCKER_ALIASES@
+# Land in the project dir for new interactive shells that start in $HOME,
+# without hijacking terminals opened elsewhere (IDEs, tmux splits, scripts).
+case $- in *i*) [ "$PWD" = "$HOME" ] && cd "@PROJECT_DIR@" 2>/dev/null ;; esac
+true
 RCBLOCK
 )
-
-  RC_FILES=("$HOME/.bashrc")
-  if command -v zsh >/dev/null 2>&1; then
-    RC_FILES+=("$HOME/.zshrc")
+  block=${block//@LOCALE@/$LOCALE}
+  block=${block//@PROJECT_DIR@/$PROJECT_DIR}
+  local docker_aliases=""
+  if is_true "$INSTALL_DOCKER"; then
+    docker_aliases='alias dc="docker compose"'$'\n'"alias dps=\"docker ps --format 'table {{.Names}}\\t{{.Status}}\\t{{.Ports}}'\""
   fi
-  for rc in "${RC_FILES[@]}"; do
-    touch "$rc"
-    if grep -q "Claude Code Environment" "$rc" 2>/dev/null; then
-      info "$(basename "$rc") already has the Claude Code block, skipping."
-    else
-      printf '%s\n' "$RC_BLOCK" >> "$rc"
-      info "Added Claude Code environment block to $(basename "$rc")."
-    fi
-  done
+  block=${block//@DOCKER_ALIASES@/$docker_aliases}
 
-  CURRENT_STEP="Setting up weekly auto-update cron"
-  echo ">>> Setting up weekly auto-update cron..."
-  cat > /tmp/system-update.cron << 'CRON'
-# Weekly system update - Sunday 3:00 AM (system local time)
+  local rc_files=("$HOME/.bashrc")
+  have zsh && rc_files+=("$HOME/.zshrc")
+  for rc in "${rc_files[@]}"; do
+    touch "$rc"
+    # Migrate the unmarked block written by older versions of this script.
+    # shellcheck disable=SC2016 # matching a literal $HOME
+    if grep -q '^# ── Claude Code Environment' "$rc" && grep -q 'cd "\$HOME/project" 2>/dev/null || true$' "$rc"; then
+      tmp=$(mktemp -p "$WORK_DIR")
+      awk '/^# ── Claude Code Environment/{skip=1} !skip{print} skip && /cd "\$HOME\/project" 2>\/dev\/null \|\| true$/{skip=0}' "$rc" > "$tmp"
+      cat "$tmp" > "$rc"
+      info "Migrated old Claude Code block in $(basename "$rc")."
+    fi
+    write_managed_block "$rc" "$begin" "$end" "$block"
+    info "Updated Claude Code block in $(basename "$rc")."
+  done
+}
+
+setup_auto_update() {
+  is_true "$AUTO_UPDATE" || { info "Skipping weekly auto-update cron (declined)."; return 0; }
+  step "Setting up weekly auto-update cron"
+  # Braces so the log captures every command, not just the last one; confold
+  # keeps local config files so an upgrade can never block on a prompt.
+  sudo tee /etc/cron.d/system-update >/dev/null <<'CRON'
+# Weekly system update - Sunday 03:00 (system local time). Managed by claude-code-vm-setup.
 SHELL=/bin/bash
 PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
-0 3 * * 0 root apt-get update -qq && apt-get upgrade -y -qq && apt-get autoremove -y -qq && apt-get clean -qq >> /var/log/auto-update.log 2>&1
+0 3 * * 0 root { date; export DEBIAN_FRONTEND=noninteractive; apt-get update -qq && apt-get -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold upgrade -y -qq && apt-get autoremove -y -qq && apt-get clean -qq; } >> /var/log/auto-update.log 2>&1
 CRON
-  sudo mv /tmp/system-update.cron /etc/cron.d/system-update
-  sudo chown root:root /etc/cron.d/system-update
   sudo chmod 0644 /etc/cron.d/system-update
 
-  cat > /tmp/auto-update.logrotate << 'LOGROTATE'
+  sudo tee /etc/logrotate.d/auto-update >/dev/null <<'LOGROTATE'
 /var/log/auto-update.log {
     monthly
     rotate 3
@@ -602,75 +791,78 @@ CRON
     notifempty
 }
 LOGROTATE
-  sudo mv /tmp/auto-update.logrotate /etc/logrotate.d/auto-update
-  sudo chown root:root /etc/logrotate.d/auto-update
+}
 
-  CURRENT_STEP="Cleaning up"
-  echo ">>> Cleaning up..."
-  sudo apt-get autoremove -y -qq
+final_cleanup() {
+  step "Cleaning up"
+  sudo apt-get autoremove -y -qq >/dev/null
   sudo apt-get clean -qq
 }
 
-# ── Print Summary ─────────────────────────────────────────────────────────
+# ── Summary ────────────────────────────────────────────────────────────────
 print_summary() {
+  local n=1
   echo ""
   echo -e "${GREEN}${BOLD}╔══════════════════════════════════════════════════╗${NC}"
-  echo -e "${GREEN}${BOLD}║       Claude Code VM Ready!                     ║${NC}"
+  echo -e "${GREEN}${BOLD}║               Claude Code VM Ready!              ║${NC}"
   echo -e "${GREEN}${BOLD}╚══════════════════════════════════════════════════╝${NC}"
   echo ""
-  echo -e "  ${BOLD}User:${NC}       $USER (sudo-capable)"
-  echo -e "  ${BOLD}Project dir:${NC} $HOME/project"
+  echo -e "  ${BOLD}User:${NC}         $USER (sudo-capable)"
+  echo -e "  ${BOLD}Project dir:${NC}  $PROJECT_DIR"
+  echo -e "  ${BOLD}Claude Code:${NC}  $(claude --version 2>/dev/null || echo '?') via $CLAUDE_INSTALL_METHOD"
+  if $USE_SYNC; then
+    if [[ "${SYNC_FAILED:-false}" == "true" ]]; then
+      echo -e "  ${BOLD}Config:${NC}       ${YELLOW}claude-config-sync FAILED${NC} — see warnings above"
+    else
+      echo -e "  ${BOLD}Config:${NC}       claude-config-sync ← $CLAUDE_SYNC_REPO_URL"
+    fi
+  else
+    echo -e "  ${BOLD}Config:${NC}       local ~/.claude/settings.json (plugins: $(is_true "$INSTALL_PLUGINS" && echo bundle || echo none))"
+  fi
+  echo -e "  ${BOLD}Locale:${NC}       $LOCALE"
+  is_true "$AUTO_UPDATE" && echo -e "  ${BOLD}Auto-updates:${NC} apt upgrade every Sunday 03:00 (log: /var/log/auto-update.log)"
   echo ""
   echo -e "  ${BOLD}Next steps:${NC}"
-  step=1
-  if [[ "${INSTALL_DOCKER,,}" == y* ]]; then
-    echo -e "    ${step}. Log out and back in (or run: ${CYAN}newgrp docker${NC}) so the docker group applies"; step=$((step+1))
+  if is_true "$INSTALL_DOCKER" && ! id -nG | grep -qw docker; then
+    echo -e "    $((n++)). Log out and back in (or ${CYAN}newgrp docker${NC}) so the docker group applies"
   fi
-  echo -e "    ${step}. ${CYAN}source ~/.bashrc${NC} (or ~/.zshrc, or just open a new shell)"; step=$((step+1))
-  if [[ "${SETUP_GITHUB,,}" == y* ]]; then
-    echo -e "    ${step}. ${CYAN}gh auth status${NC}  /  ${CYAN}ssh -T git@github.com${NC}  — confirm GitHub access"; step=$((step+1))
+  echo -e "    $((n++)). Open a new shell (or ${CYAN}source ~/.bashrc${NC})"
+  if is_true "$SETUP_GITHUB"; then
+    echo -e "    $((n++)). ${CYAN}gh auth status${NC} / ${CYAN}ssh -T git@github.com${NC} — confirm GitHub access"
   fi
-  echo -e "    ${step}. ${CYAN}cd ~/project && claude${NC}, then ${CYAN}/login${NC} (Pro/Max required for Remote Control)"; step=$((step+1))
-  echo -e "    ${step}. On Windows Claude Desktop: Settings → Claude Code → enable remote control, then"
-  echo -e "       find this VM's session in the session list (or claude.ai/code) to drive it remotely"
-  echo ""
-  echo -e "  ${BOLD}Installed:${NC}"
-  echo "    • Claude Code (apt)       • Node.js 22 LTS"
-  echo "    • Python 3 + pip + venv   • Go (latest)"
-  echo "    • Rust (via rustup)       • Build essentials"
-  echo "    • ripgrep, fzf, fd        • PostgreSQL & Redis CLI"
-  [[ "${INSTALL_DOCKER,,}" == y* ]] && echo "    • Docker + Compose (no containers deployed)"
-  [[ "${SETUP_GITHUB,,}" == y* ]] && echo "    • Git + GitHub CLI (gh)"
-  echo ""
-  echo -e "  ${BOLD}Permissions:${NC}  All tools pre-approved (no prompts)"
-  echo -e "  ${BOLD}Config:${NC}      ~/.claude/settings.json"
-  if [[ "${INSTALL_PLUGINS,,}" == y* ]]; then
-    plugin_list="frontend-design, code-review, commit-commands, security-guidance, context7, superpowers, deployment-engineer"
-    [[ "${INSTALL_DOCKER,,}" == y* ]] && plugin_list="${plugin_list}, docker"
-    [[ "${SETUP_GITHUB,,}" == y* ]] && plugin_list="${plugin_list}, github"
-    echo -e "  ${BOLD}Plugins:${NC}     ${plugin_list}"
-    echo -e "               (run /plugin to verify)"
-  else
-    echo -e "  ${BOLD}Plugins:${NC}     none (declined)"
+  if [[ "${SYNC_FAILED:-false}" == "true" ]]; then
+    echo -e "    $((n++)). Re-run ${CYAN}$0 --sync-repo $CLAUDE_SYNC_REPO_URL${NC} once the cause is fixed"
   fi
-  if [[ "${INSTALL_WEBAPP_TESTING,,}" == y* ]]; then
-    echo -e "  ${BOLD}Skills:${NC}      webapp-testing"
-  fi
-  echo -e "  ${BOLD}Locale:${NC}      en_GB.UTF-8"
-  echo -e "  ${BOLD}Auto-updates:${NC} System packages every Sunday 3 AM (local system time)"
-  if [[ "${SETUP_GITHUB,,}" == y* ]]; then
-    echo -e "  ${BOLD}GitHub:${NC}      SSH key at ~/.ssh/id_ed25519.pub — add at github.com/settings/keys"
-    echo -e "               if 'gh auth login' didn't already link it"
-  fi
+  echo -e "    $((n++)). ${CYAN}cd $PROJECT_DIR && claude${NC}, then ${CYAN}/login${NC} (Pro/Max needed for Remote Control)"
+  echo -e "    $((n++)). In Claude Desktop / claude.ai/code, pick this VM's session to drive it remotely"
   echo ""
 }
 
-# ── Main ──────────────────────────────────────────────────────────────────
+# ── Main ───────────────────────────────────────────────────────────────────
 main() {
+  parse_args "$@"
   header
   preflight
-  get_git_config
-  provision
+  gather_config
+
+  export DEBIAN_FRONTEND=noninteractive
+  setup_locale
+  install_packages
+  install_node
+  install_go
+  install_rust
+  install_docker
+  setup_git
+  setup_github
+  install_claude_code
+  SYNC_FAILED=false
+  if $USE_SYNC; then setup_config_sync; else setup_local_config; fi
+  enable_remote_control
+  install_webapp_testing
+  write_project_claude_md
+  setup_shell
+  setup_auto_update
+  final_cleanup
   print_summary
 }
 
