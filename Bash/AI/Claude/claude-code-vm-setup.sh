@@ -857,6 +857,49 @@ enable_remote_control() {
 # with lingering enabled, so it starts at boot without anyone logged in and
 # comes back if it exits (server mode gives up after ~10 min offline).
 RC_UNIT="claude-remote-control.service"
+
+# A headless server can't answer the workspace-trust dialog, so trust the
+# project dir up front (the equivalent of accepting it in `claude` once).
+trust_project_dir() {
+  local cfg="$HOME/.claude.json" tmp
+  mkdir -p "$PROJECT_DIR"
+  [[ -f "$cfg" ]] || echo '{}' > "$cfg"
+  jq -e . "$cfg" >/dev/null 2>&1 || return 0
+  tmp=$(mktemp -p "$WORK_DIR")
+  jq --arg d "$PROJECT_DIR" '.projects[$d] = ((.projects[$d] // {}) + {hasTrustDialogAccepted: true})' "$cfg" > "$tmp" \
+    && cat "$tmp" > "$cfg"
+}
+
+# `claude remote-control` asks a one-time "Enable Remote Control? (y/n)"
+# before it will serve. Under systemd stdin is empty, which counts as "no":
+# it exits 0 and restarts every minute forever. There's no documented way to
+# pre-set the answer, so let the user give it here, in phase 1, by running
+# the server once in the foreground.
+confirm_remote_control() {
+  is_true "$REMOTE_CONTROL_SERVICE" || return 0
+  if systemctl --user is-active -q "$RC_UNIT" 2>/dev/null; then
+    return 0   # already serving, so the confirmation was given on an earlier run
+  fi
+  if ! claude_logged_in; then
+    warn "Not signed in to Claude, so Remote Control can't be confirmed yet. After 'claude auth login', run once: cd $PROJECT_DIR && claude remote-control"
+    return 0
+  fi
+  if [[ ! -t 0 ]]; then
+    warn "No terminal attached — run once to confirm Remote Control: cd $PROJECT_DIR && claude remote-control"
+    return 0
+  fi
+  step "Confirming Remote Control (one-time)"
+  trust_project_dir
+  echo "Claude will ask 'Enable Remote Control? (y/n)' — answer y. When the session URL appears,"
+  echo "press Ctrl+C to carry on (the background service takes over later). Stops by itself after 2 minutes."
+  # Ctrl+C should stop only claude, not this script: a no-op handler (unlike
+  # an ignore, which claude would inherit) lets bash survive it. --foreground
+  # keeps claude in the terminal's process group so it can read the answer.
+  trap ':' INT
+  ( cd "$PROJECT_DIR" && timeout --foreground 120 claude remote-control --name "$(hostname)" ) || true
+  trap on_interrupt INT
+  echo ""
+}
 setup_remote_control_service() {
   is_true "$REMOTE_CONTROL_SERVICE" || { info "Skipping Remote Control service (declined)."; return 0; }
   step "Setting up always-on Remote Control service"
@@ -865,16 +908,9 @@ setup_remote_control_service() {
     RC_SERVICE_STATE="unsupported"; return 0
   fi
 
-  local claude_bin cfg="$HOME/.claude.json" tmp unit_dir="$HOME/.config/systemd/user" unit
+  local claude_bin unit_dir="$HOME/.config/systemd/user" unit
   claude_bin=$(command -v claude)
-
-  # A headless server can't answer the workspace-trust dialog, so trust the
-  # project dir up front (the equivalent of accepting it in `claude` once).
-  if jq -e . "$cfg" >/dev/null 2>&1; then
-    tmp=$(mktemp -p "$WORK_DIR")
-    jq --arg d "$PROJECT_DIR" '.projects[$d] = ((.projects[$d] // {}) + {hasTrustDialogAccepted: true})' "$cfg" > "$tmp" \
-      && cat "$tmp" > "$cfg"
-  fi
+  trust_project_dir
 
   mkdir -p "$unit_dir"
   unit="[Unit]
@@ -1156,6 +1192,9 @@ health_check() {
           check warn "Remote Control" "service enabled; starts once you sign in" "claude auth login"
         elif systemctl --user is-active -q "$RC_UNIT"; then
           check ok "Remote Control" "service running, starts at boot"
+        elif journalctl --user -u "$RC_UNIT" -n 20 --no-pager 2>/dev/null | grep -q 'Enable Remote Control?'; then
+          check fail "Remote Control" "waiting for the one-time confirmation" \
+            "cd $PROJECT_DIR && claude remote-control (answer y, then Ctrl+C)"
         else
           check fail "Remote Control" "service not staying up" "journalctl --user -u claude-remote-control -n 50"
         fi ;;
@@ -1233,6 +1272,7 @@ main() {
   setup_github
   install_claude_code
   claude_login
+  confirm_remote_control
 
   # Phase 2: long-running and fully unattended.
   phase "2/2 — Installing everything else (no more input needed — safe to walk away)"
