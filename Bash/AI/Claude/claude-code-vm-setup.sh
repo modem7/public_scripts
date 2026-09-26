@@ -8,9 +8,9 @@
 #
 #  What it does:
 #  - Always: locale, core/build packages, Node.js LTS, Go, Rust, Claude Code.
-#  - Optional (asked up front, default yes): Docker, GitHub CLI + SSH key +
-#    `gh auth login`, the webapp-testing skill (Python Playwright), weekly
-#    unattended apt upgrades.
+#  - Optional (asked up front, default yes): Docker, GitHub CLI + a dedicated
+#    GitHub SSH key (wired up in ~/.ssh/config) + `gh auth login`, the
+#    webapp-testing skill (Python Playwright), weekly unattended apt upgrades.
 #  - Claude Code config comes from ONE of:
 #      a) claude-config-sync (https://github.com/modem7/claude-config-sync):
 #         give it your private sync repo URL and it clones it to
@@ -18,6 +18,8 @@
 #         hooks, skills, plugins and memory all come from your repo; or
 #      b) a local baseline settings.json (+ optional plugin bundle), MERGED
 #         into any existing file rather than overwriting it.
+#  - Shell environment (PATH, aliases) goes in the rc file of your login shell
+#    (zsh or bash), plus the other one's if it already exists.
 #  - Remote Control auto-start, so the VM can be driven from Claude Desktop /
 #    claude.ai/code (outbound HTTPS only, no inbound ports).
 #
@@ -32,7 +34,7 @@
 #  Every prompt can be pre-answered with an environment variable, for
 #  unattended runs (booleans accept y/yes/true/1 or n/no/false/0):
 #    GIT_NAME, GIT_EMAIL             git identity
-#    SETUP_GITHUB                    gh CLI + SSH key + gh auth login
+#    SETUP_GITHUB                    gh CLI + dedicated SSH key + gh auth login
 #    INSTALL_DOCKER                  Docker Engine + Compose plugin
 #    CLAUDE_SYNC_REPO_URL            claude-config-sync repo ("" = don't use it)
 #    INSTALL_PLUGINS                 plugin bundle (local config mode only)
@@ -42,6 +44,8 @@
 #    PROJECT_DIR      (default ~/project)   LOCALE (default en_GB.UTF-8)
 #    NODE_MAJOR       (default 24)          CLAUDE_INSTALL_METHOD (apt|native)
 #    CLAUDE_SYNC_REPO_DIR (default ~/claude-config)
+#    GITHUB_SSH_KEY   (default ~/.ssh/id_ed25519_github — a dedicated key,
+#                      wired to github.com via ~/.ssh/config)
 # ============================================================================
 
 set -euo pipefail
@@ -53,6 +57,7 @@ NODE_MAJOR_EXPLICIT="${NODE_MAJOR:+true}"
 NODE_MAJOR="${NODE_MAJOR:-24}"
 CLAUDE_INSTALL_METHOD="${CLAUDE_INSTALL_METHOD:-apt}"
 CLAUDE_SYNC_REPO_DIR="${CLAUDE_SYNC_REPO_DIR:-$HOME/claude-config}"
+GITHUB_SSH_KEY="${GITHUB_SSH_KEY:-$HOME/.ssh/id_ed25519_github}"
 CLAUDE_APT_KEY_FPR="31DDDE24DDFAB679F42D7BD2BAA929FF1A7ECACE"
 ASSUME_YES="false"
 # Distinguishes "not set" from "set to empty" (= explicitly don't sync).
@@ -220,6 +225,32 @@ preflight() {
   fi
 
   DPKG_ARCH=$(dpkg --print-architecture)
+  detect_shell
+}
+
+# Works out which rc file(s) get the environment block. The login shell comes
+# from the passwd entry rather than $SHELL, which can be inherited from
+# whatever launched this script (and this script always runs under bash).
+detect_shell() {
+  local shell_path
+  shell_path=$(getent passwd "$USER" 2>/dev/null | cut -d: -f7)
+  LOGIN_SHELL=$(basename "${shell_path:-${SHELL:-/bin/bash}}")
+
+  SHELL_RC_FILES=()
+  case "$LOGIN_SHELL" in
+    zsh)  SHELL_RC_FILES=("$HOME/.zshrc")
+          [[ -f "$HOME/.bashrc" ]] && SHELL_RC_FILES+=("$HOME/.bashrc") ;;
+    bash) SHELL_RC_FILES=("$HOME/.bashrc")
+          [[ -f "$HOME/.zshrc" ]] && SHELL_RC_FILES+=("$HOME/.zshrc") ;;
+    *)    # fish, dash, etc. can't source the POSIX-ish block; still set up
+          # bash (used by scripts, tmux, Claude's own Bash tool) and say so.
+          warn "Login shell '$LOGIN_SHELL' isn't supported for the environment block; only ~/.bashrc will be updated."
+          warn "Add ~/.local/bin, ~/.npm-global/bin, ~/.cargo/bin and /usr/local/go/bin to PATH in your $LOGIN_SHELL config yourself."
+          SHELL_RC_FILES=("$HOME/.bashrc")
+          [[ -f "$HOME/.zshrc" ]] && SHELL_RC_FILES+=("$HOME/.zshrc") ;;
+  esac
+  PRIMARY_RC="${SHELL_RC_FILES[0]}"
+  info "Login shell: $LOGIN_SHELL (environment block goes in: ${SHELL_RC_FILES[*]/#$HOME/\~})"
 }
 
 # ── Questions (all asked up front so the long install can run unattended) ──
@@ -444,14 +475,19 @@ setup_github() {
   fi
   echo "    gh $(gh --version | head -1 | awk '{print $3}')"
 
-  step "Setting up SSH key for GitHub"
-  local key="$HOME/.ssh/id_ed25519"
+  step "Setting up a dedicated SSH key for GitHub"
+  # A key used only for GitHub (not the default ~/.ssh/id_ed25519), so it can
+  # be revoked on its own and is never offered to other hosts.
+  local key="$GITHUB_SSH_KEY" title legacy="$HOME/.ssh/id_ed25519"
+  title="$(hostname) (claude-code-vm-setup)"
   install -d -m 700 "$HOME/.ssh"
   if [[ -f "$key" ]]; then
-    info "Reusing existing SSH key at $key."
+    info "Reusing existing GitHub SSH key at $key."
   else
-    ssh-keygen -q -t ed25519 -C "$GIT_EMAIL" -f "$key" -N ""
+    ssh-keygen -q -t ed25519 -C "$GIT_EMAIL github@$(hostname)" -f "$key" -N ""
+    success "Generated $key."
   fi
+
   # Pin github.com's host keys from its HTTPS API (authenticated by TLS)
   # rather than trusting whatever ssh-keyscan happens to be told.
   if ssh-keygen -F github.com >/dev/null 2>&1; then
@@ -467,30 +503,94 @@ setup_github() {
     info "gh is already authenticated — skipping gh auth login."
   elif [[ -t 0 ]]; then
     step "Running 'gh auth login' (interactive — follow the browser/device-code prompts)"
-    # -p ssh makes gh offer to upload the key generated above.
-    gh auth login -h github.com -p ssh || warn "gh auth login did not complete; run it later with: gh auth login -p ssh"
+    # --skip-ssh-key: gh would otherwise offer whichever key it finds first
+    # (often the default one); the dedicated key is uploaded explicitly below,
+    # which is what the admin:public_key scope is for.
+    gh auth login -h github.com -p ssh --skip-ssh-key -s admin:public_key \
+      || warn "gh auth login did not complete; run it later with: gh auth login -p ssh"
   else
     warn "No terminal attached — skipping gh auth login. Run it later with: gh auth login -p ssh"
   fi
+  gh auth status -h github.com >/dev/null 2>&1 && { gh auth setup-git >/dev/null 2>&1 || true; }
 
-  if gh auth status -h github.com >/dev/null 2>&1; then
-    gh auth setup-git >/dev/null 2>&1 || true
-    # Make sure the key is actually registered (covers re-runs, and logins
-    # where the upload prompt was skipped). Needs the public_key scopes, so
-    # this is best-effort.
-    local pub; pub=$(awk '{print $1" "$2}' "$key.pub")
-    if gh api user/keys --jq '.[].key' 2>/dev/null | grep -qxF "$pub"; then
-      info "SSH key is registered with GitHub."
-    elif gh ssh-key add "$key.pub" --title "$(hostname) (claude-code-vm-setup)" >/dev/null 2>&1; then
-      success "Uploaded SSH key to GitHub."
-    else
-      echo -e "${BOLD}Add this public key at https://github.com/settings/keys (or: gh auth refresh -s admin:public_key && gh ssh-key add $key.pub):${NC}"
-      cat "$key.pub"
+  # Register the key. `ssh -T` with only this key is the ground truth — it
+  # works whether or not gh is authenticated or has the key-listing scope.
+  if github_accepts_key "$key"; then
+    info "GitHub already accepts $key."
+  elif gh auth status -h github.com >/dev/null 2>&1; then
+    if ! gh ssh-key add "$key.pub" --title "$title" >/dev/null 2>&1 && [[ -t 0 ]]; then
+      info "gh needs the admin:public_key scope to upload the key — refreshing auth..."
+      { gh auth refresh -h github.com -s admin:public_key \
+          && gh ssh-key add "$key.pub" --title "$title" >/dev/null 2>&1; } || true
     fi
+    github_accepts_key "$key" && success "Uploaded $key to GitHub."
   fi
+
+  local registered=false
+  github_accepts_key "$key" && registered=true
+  if ! $registered; then
+    echo -e "${BOLD}Add this public key at https://github.com/settings/keys, then re-run this script:${NC}"
+    cat "$key.pub"
+  fi
+  write_github_ssh_config "$key" "$registered" "$legacy"
 }
 
-# ── Claude Code ────────────────────────────────────────────────────────────
+# True if GitHub authenticates us with exactly this key and nothing else.
+# Tries port 22, then GitHub's SSH-over-443 endpoint for networks that block
+# 22, and records the first reachable one in GH_SSH_HOST/GH_SSH_PORT for the
+# ~/.ssh/config block. Ignores ~/.ssh/config so only this key is tested.
+GH_SSH_HOST="github.com"
+GH_SSH_PORT="22"
+github_accepts_key() {
+  local endpoint host port out
+  for endpoint in github.com:22 ssh.github.com:443; do
+    host="${endpoint%:*}" port="${endpoint#*:}"
+    out=$(ssh -T -F /dev/null -p "$port" -i "$1" \
+            -o BatchMode=yes -o IdentitiesOnly=yes -o IdentityAgent=none \
+            -o ConnectTimeout=10 -o HostKeyAlias=github.com \
+            git@"$host" 2>&1) || true
+    case "$out" in
+      *"successfully authenticated"*) GH_SSH_HOST="$host" GH_SSH_PORT="$port"; return 0 ;;
+      *"Permission denied"*)          GH_SSH_HOST="$host" GH_SSH_PORT="$port"; return 1 ;;
+    esac
+  done
+  return 1
+}
+
+# Points github.com at the dedicated key via a managed block in ~/.ssh/config.
+# Until GitHub is confirmed to accept the new key, the old default key stays
+# listed as a fallback so existing git remotes keep working.
+write_github_ssh_config() {
+  local key="$1" registered="$2" legacy="$3" cfg="$HOME/.ssh/config" block
+  local begin="# >>> claude-code-vm-setup github >>>" end="# <<< claude-code-vm-setup github <<<"
+  touch "$cfg" && chmod 600 "$cfg"
+
+  # Don't fight a github.com entry the user wrote themselves.
+  if awk -v b="$begin" -v e="$end" '$0==b{skip=1} !skip; $0==e{skip=0}' "$cfg" \
+     | grep -qiE '^[[:space:]]*Host([[:space:]]+[^#]*)?[[:space:]]github\.com([[:space:]]|$)'; then
+    warn "$cfg already has its own 'Host github.com' entry — leaving it alone. Point it at: IdentityFile $key"
+    return 0
+  fi
+
+  block="Host github.com
+    HostName $GH_SSH_HOST
+    Port $GH_SSH_PORT
+    User git
+    IdentityFile ${key/#$HOME/\~}
+    IdentitiesOnly yes"
+  # Port 22 unreachable: ssh.github.com:443 serves the same host keys.
+  [[ "$GH_SSH_HOST" != "github.com" ]] && block+="
+    HostKeyAlias github.com"
+  if [[ "$registered" != "true" && -f "$legacy" && "$legacy" != "$key" ]]; then
+    block+="
+    # Fallback until GitHub accepts the key above; removed on the next re-run once it does.
+    IdentityFile ${legacy/#$HOME/\~}"
+    warn "GitHub doesn't accept $key yet — keeping ${legacy/#$HOME/\~} as a fallback in ~/.ssh/config."
+  fi
+  write_managed_block "$cfg" "$begin" "$end" "$block"
+  info "github.com now uses ${key/#$HOME/\~} (~/.ssh/config)."
+}
+
 install_claude_code() {
   step "Installing Claude Code"
   # The native installer puts claude in ~/.local/bin, which a fresh VM's
@@ -671,7 +771,8 @@ are deployed by default."
 ## GitHub Access
 - **gh CLI** is installed and authenticated via \`gh auth login\` (verify: \`gh auth status\`).
   Prefer \`gh\` for issues/PRs/Actions.
-- **SSH key**: ~/.ssh/id_ed25519 (verify: \`ssh -T git@github.com\`)."
+- **SSH key**: dedicated key ${GITHUB_SSH_KEY/#$HOME/\~}, used for github.com via ~/.ssh/config
+  (verify: \`ssh -T git@github.com\`)."
   fi
   if $USE_SYNC; then
     sections+="
@@ -698,6 +799,7 @@ deployment-engineer${docker_plugin}."
 - **OS**: ${PRETTY_NAME:-Ubuntu} VM ($DPKG_ARCH)
 - **Working directory**: $PROJECT_DIR
 - **User**: $USER (sudo-capable, not root)
+- **Shell**: $LOGIN_SHELL (PATH/aliases set in ${SHELL_RC_FILES[*]/#$HOME/\~})
 - **Locale**: $LOCALE
 
 ## Available Tools
@@ -721,7 +823,7 @@ this machine's session in Claude Desktop or claude.ai/code. Outbound HTTPS only;
 }
 
 setup_shell() {
-  step "Setting up shell environment (bash + zsh if present)"
+  step "Setting up shell environment ($LOGIN_SHELL)"
   local begin="# >>> claude-code-vm-setup >>>" end="# <<< claude-code-vm-setup <<<" block rc tmp
   # Quoted heredoc: $HOME, $PATH etc. stay literal and expand when the rc file
   # is sourced; @PLACEHOLDERS@ are filled in below.
@@ -752,9 +854,7 @@ RCBLOCK
   fi
   block=${block//@DOCKER_ALIASES@/$docker_aliases}
 
-  local rc_files=("$HOME/.bashrc")
-  have zsh && rc_files+=("$HOME/.zshrc")
-  for rc in "${rc_files[@]}"; do
+  for rc in "${SHELL_RC_FILES[@]}"; do
     touch "$rc"
     # Migrate the unmarked block written by older versions of this script.
     # shellcheck disable=SC2016 # matching a literal $HOME
@@ -826,7 +926,7 @@ print_summary() {
   if is_true "$INSTALL_DOCKER" && ! id -nG | grep -qw docker; then
     echo -e "    $((n++)). Log out and back in (or ${CYAN}newgrp docker${NC}) so the docker group applies"
   fi
-  echo -e "    $((n++)). Open a new shell (or ${CYAN}source ~/.bashrc${NC})"
+  echo -e "    $((n++)). Open a new shell (or ${CYAN}source ${PRIMARY_RC/#$HOME/\~}${NC})"
   if is_true "$SETUP_GITHUB"; then
     echo -e "    $((n++)). ${CYAN}gh auth status${NC} / ${CYAN}ssh -T git@github.com${NC} — confirm GitHub access"
   fi
