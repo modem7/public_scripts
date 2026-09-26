@@ -98,7 +98,11 @@ CPU_TYPE="host"
 DISK_STOR_DEFAULT="local-lvm"
 
 # --- Packages baked into the image ---
-VIRT_PKGS="qemu-guest-agent,cloud-utils,cloud-guest-utils"
+#   qemu-guest-agent   lets Proxmox see the IP, shut down cleanly, trim disks
+#   cloud-init         already in Ubuntu cloud images; listed as a safeguard
+#   cloud-utils,
+#   cloud-guest-utils  growpart, used by cloud-init to grow the root disk
+VIRT_PKGS="qemu-guest-agent,cloud-init,cloud-utils,cloud-guest-utils"
 EXTRA_VIRT_PKGS=""
 
 # --- SSH public key ---
@@ -939,11 +943,15 @@ _prompt_snippets() {
         return
     fi
 
-    echo "  A snippet runs on first boot of every clone. It will:"
-    echo "    - Allow SSH password login (Ubuntu cloud images block it by default)"
+    echo "  A snippet adds first-boot steps to every clone:"
     echo "    - Update and upgrade all packages"
-    echo "    - Grow the root disk to fill the drive"
-    echo "  You can edit the file afterwards."
+    if [[ -z "${SSH_KEY:-}" ]]; then
+        echo "    - Allow SSH login with a password (you set no SSH key,"
+        echo "      and Ubuntu cloud images only allow key login by default)"
+    fi
+    echo ""
+    echo "  Not needed for SSH keys or disk resizing: Proxmox and cloud-init"
+    echo "  already handle those. You can edit the file afterwards."
     echo ""
     read -rp "Create a snippet? (y/N): " choice
     if [[ ! "${choice:-N}" =~ ^[Yy]$ ]]; then
@@ -990,6 +998,10 @@ apply_snippets() {
         info "Snippet already exists, keeping your version: $snippet_path"
         info "(Delete it and re-run to regenerate.)"
     else
+        # Password login over SSH: only switched on when no SSH key was set.
+        local pwauth="# ssh_pwauth: true"
+        [[ -z "${SSH_KEY:-}" ]] && pwauth="ssh_pwauth: true"
+
         cat > "$snippet_path" <<EOF
 #cloud-config
 # Cloud-init VENDOR-DATA for: ${TEMPL_NAME}
@@ -1001,8 +1013,13 @@ apply_snippets() {
 #
 # Examples: https://cloudinit.readthedocs.io/en/latest/reference/examples.html
 
-# SSH password login. Set to false if you only use SSH keys (recommended).
-ssh_pwauth: true
+# Not needed here (cloud-init already does these):
+#   - SSH keys from the Cloud-Init tab.
+#   - Growing the root disk. Runs on every boot, so later resizes work too.
+
+# SSH login with a password. Ubuntu cloud images allow key login only.
+# Uncomment if you log in with the Cloud-Init password instead of a key.
+${pwauth}
 
 # Update and upgrade packages on first boot.
 package_update: true
@@ -1013,11 +1030,6 @@ package_upgrade: true
 #   - curl
 #   - git
 #   - vim
-
-# Grow the root partition to fill the disk.
-growpart:
-  mode: auto
-  devices: ["/"]
 
 # Logged to /var/log/cloud-init-output.log when done.
 final_message: |
@@ -1365,7 +1377,7 @@ _vm_description() {
     local upgrade_note="> **Package upgrades on first boot are off** (\`ciupgrade=0\`).
 > Upgrade after cloning, or with your config management tool."
     [[ "$SNIPPETS_ENABLED" == "yes" ]] && upgrade_note="> **First boot runs the snippet** \`${SNIPPETS_STOR}:snippets/${SNIPPETS_FILE}\`
-> (package upgrade + SSH password login)."
+> (package upgrade$([[ -z "${SSH_KEY:-}" ]] && echo " + SSH password login"))."
 
     cat <<EOF
 **OS:** ${OS_NAME}
@@ -1382,9 +1394,10 @@ _vm_description() {
 
 ### Notes
 
-> **SSH password login is OFF** in Ubuntu cloud images.
-> Use an SSH key, enable it in a cloud-init snippet, or set
-> \`PasswordAuthentication yes\` in \`/etc/ssh/sshd_config\` after first boot.
+> **SSH login:** use the SSH key from the Cloud-Init tab.
+> Ubuntu cloud images allow key login only. For password login, enable
+> \`ssh_pwauth\` in a cloud-init snippet, or set \`PasswordAuthentication yes\`
+> in \`/etc/ssh/sshd_config\` after first boot.
 
 ${upgrade_note}
 
