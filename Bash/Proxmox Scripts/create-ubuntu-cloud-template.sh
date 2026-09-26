@@ -560,11 +560,14 @@ destroy_existing_template() {
         [[ "$I_KNOW" == "yes" ]] || die "Unattended overwrite requires --i-know-what-i-am-doing."
         warn "Confirmed via --i-know-what-i-am-doing. Press Ctrl+C to abort."
     else
+        # Unnamed VMs are confirmed by ID, so an empty Enter can never match.
+        local expected="${name:-$id}" what="name"
+        [[ -z "$name" ]] && what="ID"
         echo "  VM ID:   $id"
-        echo "  VM name: ${name}"
+        echo "  VM name: ${name:-(none)}"
         echo ""
-        read -rp "  Type the VM name to confirm destruction: " confirm
-        [[ "$confirm" == "$name" ]] || die "Name did not match. Aborting overwrite."
+        read -rp "  Type the VM ${what} to confirm destruction: " confirm
+        [[ "$confirm" == "$expected" ]] || die "The ${what} did not match. Aborting overwrite."
         warn "Last chance: press Ctrl+C to abort."
     fi
     _countdown "Destroying"
@@ -833,7 +836,11 @@ _prompt_snippets() {
     echo "  You can edit the file afterwards."
     echo ""
     read -rp "Create a snippet? (y/N): " choice
-    [[ "${choice:-N}" =~ ^[Yy]$ ]] || return 0
+    if [[ ! "${choice:-N}" =~ ^[Yy]$ ]]; then
+        # Forget any profile value too, so unattended runs respect this "no".
+        SNIPPETS_STOR=""
+        return
+    fi
 
     if [[ ${#snippet_stores[@]} -eq 1 ]]; then
         SNIPPETS_STOR="${snippet_stores[0]}"
