@@ -144,21 +144,40 @@ ask() {
   printf -v "$var" '%s' "$answer"
 }
 
+# sudo drops the caller's environment, so an exported DEBIAN_FRONTEND never
+# reached apt; pass it (and needrestart's opt-out, which otherwise prints
+# "Scanning processes..." after every install) on the sudo line itself.
+apt_get() {
+  sudo DEBIAN_FRONTEND=noninteractive NEEDRESTART_SUSPEND=1 apt-get "$@"
+}
+
+# quiet CMD... — runs a chatty installer with its output captured, showing
+# it only if the command fails (last 30 lines).
+quiet() {
+  local log rc=0
+  log=$(mktemp -p "$WORK_DIR" step.XXXX.log)
+  "$@" >"$log" 2>&1 || rc=$?
+  [[ $rc -eq 0 ]] && return 0
+  warn "Command failed (exit $rc): $*"
+  tail -n 30 "$log" >&2
+  return "$rc"
+}
+
 # Lenient installer for nice-to-have packages: try the batch, then fall back
 # to one-by-one so a single renamed/dropped package can't abort the run.
 apt_install() {
-  if ! sudo apt-get install -y -qq "$@" >/dev/null 2>&1; then
+  if ! apt_get install -y -qq "$@" >/dev/null 2>&1; then
     warn "batch install failed; retrying individually..."
     local p
     for p in "$@"; do
-      sudo apt-get install -y -qq "$p" >/dev/null 2>&1 || warn "skipped (unavailable): $p"
+      apt_get install -y -qq "$p" >/dev/null 2>&1 || warn "skipped (unavailable): $p"
     done
   fi
 }
 
 # Strict installer for packages the rest of the script depends on.
 apt_install_required() {
-  sudo apt-get install -y -qq "$@" >/dev/null || error "Failed to install required package(s): $*"
+  apt_get install -y -qq "$@" >/dev/null || error "Failed to install required package(s): $*"
 }
 
 # write_managed_block FILE BEGIN END CONTENT — replaces the text between the
@@ -243,6 +262,18 @@ preflight() {
 
   DPKG_ARCH=$(dpkg --print-architecture)
   check_cpu
+
+  # No display: there's nothing useful for gh/claude to open, and a console
+  # browser set as www-browser (w3m/lynx) would take over this terminal. A
+  # no-op BROWSER makes both just print their URL / device code.
+  [[ -z "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]] && export BROWSER=true
+
+  # An older version of this script ran NodeSource's installer with sudo -E,
+  # which left ~/.gnupg owned by root ("gpg: WARNING: unsafe ownership").
+  if [[ -d "$HOME/.gnupg" && ! -O "$HOME/.gnupg" ]]; then
+    sudo chown -R "$USER:" "$HOME/.gnupg" && chmod 700 "$HOME/.gnupg"
+    info "Fixed ownership of ~/.gnupg (was left root-owned by an earlier run)."
+  fi
   detect_shell
 }
 
@@ -341,7 +372,7 @@ gather_config() {
 # so it can start within seconds instead of after the long installs.
 bootstrap_packages() {
   step "Installing prerequisites"
-  sudo apt-get update -qq
+  apt_get update -qq
   apt_install_required git curl ca-certificates gnupg jq openssh-client
 }
 
@@ -363,7 +394,7 @@ setup_locale() {
 
 install_packages() {
   step "Updating system"
-  sudo apt-get -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold upgrade -y -qq >/dev/null
+  apt_get -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold upgrade -y -qq >/dev/null
 
   step "Installing core packages"
   apt_install_required wget rsync
@@ -394,8 +425,20 @@ install_node() {
   elif [[ -n "$current" && -z "$NODE_MAJOR_EXPLICIT" ]]; then
     info "Keeping existing Node.js $(node --version) (set NODE_MAJOR=${NODE_MAJOR} to switch)."
   else
-    curl -fsSL "https://deb.nodesource.com/setup_${NODE_MAJOR}.x" -o "$WORK_DIR/nodesource.sh"
-    sudo -E bash "$WORK_DIR/nodesource.sh" >/dev/null
+    # NodeSource's repo added directly rather than via their setup script,
+    # which calls `apt` (not apt-get) and runs gpg as root with your HOME
+    # (leaving a root-owned ~/.gnupg). The armored key is used as-is, so no
+    # gpg is needed at all. Their script's deb822 file is replaced so apt
+    # doesn't see two NodeSource entries with different Signed-By.
+    sudo install -d -m 0755 /etc/apt/keyrings
+    sudo curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key -o /etc/apt/keyrings/nodesource.asc
+    sudo rm -f /etc/apt/sources.list.d/nodesource.sources
+    echo "deb [arch=${DPKG_ARCH} signed-by=/etc/apt/keyrings/nodesource.asc] https://deb.nodesource.com/node_${NODE_MAJOR}.x nodistro main" \
+      | sudo tee /etc/apt/sources.list.d/nodesource.list >/dev/null
+    # Prefer NodeSource's nodejs over Ubuntu's own (older) package.
+    printf 'Package: nodejs\nPin: origin deb.nodesource.com\nPin-Priority: 600\n' \
+      | sudo tee /etc/apt/preferences.d/nodesource >/dev/null
+    apt_get update -qq
     apt_install_required nodejs
   fi
   echo "    Node.js $(node --version) / npm $(npm --version)"
@@ -414,7 +457,8 @@ install_node() {
     npm ls -g --depth=0 "$p" >/dev/null 2>&1 || missing+=("$p")
   done
   if [[ ${#missing[@]} -gt 0 ]]; then
-    npm install -g --no-fund --no-audit "${missing[@]}"
+    quiet npm install -g --no-fund --no-audit "${missing[@]}" || error "npm install -g ${missing[*]} failed."
+    info "Installed: ${missing[*]}"
   else
     info "All present: ${pkgs[*]}"
   fi
@@ -461,7 +505,7 @@ install_rust() {
     "$rustup_bin" update stable --no-self-update >/dev/null 2>&1 || warn "rustup update failed; keeping current toolchain."
   else
     curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs -o "$WORK_DIR/rustup.sh"
-    sh "$WORK_DIR/rustup.sh" -y -q
+    quiet sh "$WORK_DIR/rustup.sh" -y -q || error "rustup install failed."
   fi
   # shellcheck disable=SC1091
   [[ -f "$HOME/.cargo/env" ]] && source "$HOME/.cargo/env"
@@ -475,8 +519,9 @@ install_docker() {
     info "Docker already installed."
   else
     curl -fsSL https://get.docker.com -o "$WORK_DIR/get-docker.sh"
-    sudo sh "$WORK_DIR/get-docker.sh" >/dev/null
-    sudo systemctl enable --now docker || warn "Could not enable the docker service (no systemd?)."
+    quiet sudo DEBIAN_FRONTEND=noninteractive NEEDRESTART_SUSPEND=1 sh "$WORK_DIR/get-docker.sh" \
+      || error "Docker install (get.docker.com) failed."
+    sudo systemctl enable -q --now docker 2>/dev/null || warn "Could not enable the docker service (no systemd?)."
   fi
   echo "    Docker $(sudo docker --version | awk '{print $3}' | tr -d ',')"
   echo "    Compose $(sudo docker compose version --short 2>/dev/null || echo 'missing')"
@@ -515,7 +560,7 @@ setup_github() {
     sudo chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg
     echo "deb [arch=${DPKG_ARCH} signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
       | sudo tee /etc/apt/sources.list.d/github-cli.list >/dev/null
-    sudo apt-get update -qq
+    apt_get update -qq
     apt_install_required gh
   fi
   echo "    gh $(gh --version | head -1 | awk '{print $3}')"
@@ -551,7 +596,7 @@ setup_github() {
     # --skip-ssh-key: gh would otherwise offer whichever key it finds first
     # (often the default one); the dedicated key is uploaded explicitly below,
     # which is what the admin:public_key scope is for.
-    gh auth login -h github.com -p ssh --skip-ssh-key -s admin:public_key \
+    gh auth login -h github.com -p ssh --web --skip-ssh-key -s admin:public_key \
       || warn "gh auth login did not complete; run it later with: gh auth login -p ssh"
   else
     warn "No terminal attached — skipping gh auth login. Run it later with: gh auth login -p ssh"
@@ -666,7 +711,7 @@ install_claude_code() {
     fi
     echo "deb [signed-by=${keyring}] https://downloads.claude.ai/claude-code/apt/stable stable main" \
       | sudo tee /etc/apt/sources.list.d/claude-code.list >/dev/null
-    sudo apt-get update -qq
+    apt_get update -qq
     apt_install_required claude-code
   fi
   echo "    Claude Code $(claude --version 2>/dev/null || echo 'installed')"
@@ -707,14 +752,7 @@ claude_login() {
     [[ -n "${CLAUDE_EMAIL:-}" ]] && args+=(--email "$CLAUDE_EMAIL")
     echo "A sign-in URL will appear below. Open it in any browser (it doesn't have to be on this VM),"
     echo "sign in with your Pro/Max account, then paste the code it gives you back here."
-    # With no display there's nothing useful to open, and a console browser
-    # (w3m/lynx as www-browser) would take over this terminal — so make the
-    # "open browser" attempt a no-op and rely on the printed URL.
-    if [[ -z "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]]; then
-      BROWSER=true claude auth login "${args[@]}" || warn "Claude sign-in didn't complete; run it later with: claude auth login"
-    else
-      claude auth login "${args[@]}" || warn "Claude sign-in didn't complete; run it later with: claude auth login"
-    fi
+    claude auth login "${args[@]}" || warn "Claude sign-in didn't complete; run it later with: claude auth login"
   else
     warn "No terminal attached — skipping Claude sign-in. Run it later with: claude auth login"
   fi
@@ -819,6 +857,49 @@ enable_remote_control() {
 # with lingering enabled, so it starts at boot without anyone logged in and
 # comes back if it exits (server mode gives up after ~10 min offline).
 RC_UNIT="claude-remote-control.service"
+
+# A headless server can't answer the workspace-trust dialog, so trust the
+# project dir up front (the equivalent of accepting it in `claude` once).
+trust_project_dir() {
+  local cfg="$HOME/.claude.json" tmp
+  mkdir -p "$PROJECT_DIR"
+  [[ -f "$cfg" ]] || echo '{}' > "$cfg"
+  jq -e . "$cfg" >/dev/null 2>&1 || return 0
+  tmp=$(mktemp -p "$WORK_DIR")
+  jq --arg d "$PROJECT_DIR" '.projects[$d] = ((.projects[$d] // {}) + {hasTrustDialogAccepted: true})' "$cfg" > "$tmp" \
+    && cat "$tmp" > "$cfg"
+}
+
+# `claude remote-control` asks a one-time "Enable Remote Control? (y/n)"
+# before it will serve. Under systemd stdin is empty, which counts as "no":
+# it exits 0 and restarts every minute forever. There's no documented way to
+# pre-set the answer, so let the user give it here, in phase 1, by running
+# the server once in the foreground.
+confirm_remote_control() {
+  is_true "$REMOTE_CONTROL_SERVICE" || return 0
+  if systemctl --user is-active -q "$RC_UNIT" 2>/dev/null; then
+    return 0   # already serving, so the confirmation was given on an earlier run
+  fi
+  if ! claude_logged_in; then
+    warn "Not signed in to Claude, so Remote Control can't be confirmed yet. After 'claude auth login', run once: cd $PROJECT_DIR && claude remote-control"
+    return 0
+  fi
+  if [[ ! -t 0 ]]; then
+    warn "No terminal attached — run once to confirm Remote Control: cd $PROJECT_DIR && claude remote-control"
+    return 0
+  fi
+  step "Confirming Remote Control (one-time)"
+  trust_project_dir
+  echo "Claude will ask 'Enable Remote Control? (y/n)' — answer y. When the session URL appears,"
+  echo "press Ctrl+C to carry on (the background service takes over later). Stops by itself after 2 minutes."
+  # Ctrl+C should stop only claude, not this script: a no-op handler (unlike
+  # an ignore, which claude would inherit) lets bash survive it. --foreground
+  # keeps claude in the terminal's process group so it can read the answer.
+  trap ':' INT
+  ( cd "$PROJECT_DIR" && timeout --foreground 120 claude remote-control --name "$(hostname)" ) || true
+  trap on_interrupt INT
+  echo ""
+}
 setup_remote_control_service() {
   is_true "$REMOTE_CONTROL_SERVICE" || { info "Skipping Remote Control service (declined)."; return 0; }
   step "Setting up always-on Remote Control service"
@@ -827,16 +908,9 @@ setup_remote_control_service() {
     RC_SERVICE_STATE="unsupported"; return 0
   fi
 
-  local claude_bin cfg="$HOME/.claude.json" tmp unit_dir="$HOME/.config/systemd/user" unit
+  local claude_bin unit_dir="$HOME/.config/systemd/user" unit
   claude_bin=$(command -v claude)
-
-  # A headless server can't answer the workspace-trust dialog, so trust the
-  # project dir up front (the equivalent of accepting it in `claude` once).
-  if jq -e . "$cfg" >/dev/null 2>&1; then
-    tmp=$(mktemp -p "$WORK_DIR")
-    jq --arg d "$PROJECT_DIR" '.projects[$d] = ((.projects[$d] // {}) + {hasTrustDialogAccepted: true})' "$cfg" > "$tmp" \
-      && cat "$tmp" > "$cfg"
-  fi
+  trust_project_dir
 
   mkdir -p "$unit_dir"
   unit="[Unit]
@@ -899,8 +973,8 @@ install_webapp_testing() {
   # The skill drives Playwright from Python scripts, so it needs the Python
   # package — the npm one alone leaves it broken.
   step "Installing Playwright (Python) + Chromium"
-  python3 -m pip install --user --break-system-packages --quiet --upgrade playwright
-  python3 -m playwright install --with-deps chromium
+  quiet python3 -m pip install --user --break-system-packages --upgrade playwright || error "pip install playwright failed."
+  quiet python3 -m playwright install --with-deps chromium || error "Playwright browser install failed."
 }
 
 # ── Workspace ──────────────────────────────────────────────────────────────
@@ -1063,8 +1137,8 @@ LOGROTATE
 
 final_cleanup() {
   step "Cleaning up"
-  sudo apt-get autoremove -y -qq >/dev/null
-  sudo apt-get clean -qq
+  apt_get autoremove -y -qq >/dev/null
+  apt_get clean -qq
 }
 
 # ── Health check ───────────────────────────────────────────────────────────
@@ -1118,6 +1192,9 @@ health_check() {
           check warn "Remote Control" "service enabled; starts once you sign in" "claude auth login"
         elif systemctl --user is-active -q "$RC_UNIT"; then
           check ok "Remote Control" "service running, starts at boot"
+        elif journalctl --user -u "$RC_UNIT" -n 20 --no-pager 2>/dev/null | grep -q 'Enable Remote Control?'; then
+          check fail "Remote Control" "waiting for the one-time confirmation" \
+            "cd $PROJECT_DIR && claude remote-control (answer y, then Ctrl+C)"
         else
           check fail "Remote Control" "service not staying up" "journalctl --user -u claude-remote-control -n 50"
         fi ;;
@@ -1195,6 +1272,7 @@ main() {
   setup_github
   install_claude_code
   claude_login
+  confirm_remote_control
 
   # Phase 2: long-running and fully unattended.
   phase "2/2 — Installing everything else (no more input needed — safe to walk away)"
