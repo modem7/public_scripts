@@ -3,6 +3,18 @@
 #  Proxmox Ubuntu Cloud-Init Template Creator
 # =============================================================================
 #
+#  Author:   Alex Lane (modem7) - https://github.com/modem7
+#  Licence:  MIT - Copyright (c) 2026 Alex Lane
+#            Free to use, change and share. Keep this notice.
+#            Provided as-is, with no warranty. Full text:
+#            https://github.com/modem7/public_scripts/blob/master/LICENSE
+#  Repo:     https://github.com/modem7/public_scripts
+#  Latest:   https://github.com/modem7/public_scripts/blob/master/Bash/Proxmox%20Scripts/create-ubuntu-cloud-template.sh
+#  Issues:   https://github.com/modem7/public_scripts/issues
+#  Support:  https://www.buymeacoffee.com/modem7
+#
+#  SPDX-License-Identifier: MIT
+#
 #  WHAT IT DOES
 #    Builds a ready-to-clone Ubuntu VM template on a Proxmox VE host.
 #    1. Downloads the official Ubuntu cloud image (SHA256 verified).
@@ -77,9 +89,10 @@ TZ="Europe/London"
 
 # --- VM hardware ---
 VMID_DEFAULT="52000"
-CORES="2"
+SOCKETS="1"              # only asked on multi-NUMA-node hosts; NUMA is on when > 1
+CORES="2"                # per socket
 MEM="2048"               # MB
-BALLOON="768"            # MB, minimum RAM when ballooning
+BALLOON="768"            # MB, minimum RAM when ballooning. 0 = ballooning off
 BIOS="ovmf"              # UEFI
 MACHINE="q35"
 DISK_SIZE="15G"
@@ -164,6 +177,25 @@ _read_index() {
             return
         fi
         warn "Enter a number from 1 to $max."
+    done
+}
+
+# Ask for a whole number in a range. Re-asks until valid.
+# A default outside the range is pulled into it.
+# Usage: _read_number "Prompt" <default> <min> <max>   -> result in $NUM
+_read_number() {
+    local prompt="$1" def="$2" min="$3" max="$4" ans
+    [[ "$def" =~ ^[0-9]+$ ]] || def="$min"
+    (( 10#$def < min )) && def="$min"
+    (( 10#$def > max )) && def="$max"
+    while true; do
+        read -rp "${prompt} [$((10#$def))]: " ans
+        ans="${ans:-$def}"
+        if [[ "$ans" =~ ^[0-9]+$ ]] && (( 10#$ans >= min && 10#$ans <= max )); then
+            NUM=$((10#$ans))
+            return
+        fi
+        warn "Enter a number from $min to $max."
     done
 }
 
@@ -532,9 +564,17 @@ _set_distro_vars() {
 #  The disk format is picked from the storage type:
 #    Block storage (ZFS, LVM, Ceph, BTRFS) -> raw
 #    File storage (dir, NFS, CIFS)          -> qcow2
+#  Disk cache:
+#    ZFS        -> none. ZFS has its own cache (ARC); a host cache on top
+#                  would double-buffer.
+#    Everything else -> writethrough.
 # =============================================================================
 _resolve_storage_type() {
     STORAGE_TYPE="$1"
+    case "$STORAGE_TYPE" in
+        zfspool|zfs) DISK_CACHE="none" ;;
+        *)           DISK_CACHE="writethrough" ;;
+    esac
     case "$STORAGE_TYPE" in
         zfspool|zfs|lvmthin|lvm|rbd|btrfs)
             STORAGE_FORMAT="raw" ;;
@@ -1050,6 +1090,98 @@ EOF
 }
 
 # =============================================================================
+#  CPU AND MEMORY
+#  Sockets: only asked on hosts with more than one NUMA node (usually
+#  multi-CPU servers). NUMA is switched on for the VM when sockets > 1,
+#  so Proxmox can keep each socket's RAM on the matching host node.
+#  Ballooning: lets Proxmox reclaim unused RAM from the VM when the host
+#  runs low. BALLOON is the minimum the VM keeps. 0 = ballooning off.
+# =============================================================================
+
+# Number of NUMA nodes on this host (1 on most single-CPU machines).
+_host_numa_nodes() {
+    local n
+    n="$(compgen -G '/sys/devices/system/node/node[0-9]*' | wc -l)"
+    echo $(( n > 0 ? n : 1 ))
+}
+
+_numa_flag() { (( SOCKETS > 1 )) && echo 1 || echo 0; }
+
+# e.g. "1 socket x 2 cores (host)" or "2 sockets x 4 cores (host, NUMA on)"
+_cpu_summary() {
+    local s="socket"
+    (( SOCKETS > 1 )) && s="sockets"
+    echo "$SOCKETS $s x $CORES cores ($CPU_TYPE$( (( SOCKETS > 1 )) && echo ", NUMA on"))"
+}
+
+# e.g. "2048 MB (ballooning, min 768 MB)" or "2048 MB (ballooning off)"
+_mem_summary() {
+    if (( BALLOON > 0 )); then
+        echo "$MEM MB (ballooning, min $BALLOON MB)"
+    else
+        echo "$MEM MB (ballooning off)"
+    fi
+}
+
+# Unattended: values come from the profile, so check them before any work.
+_validate_cpu_mem() {
+    local v
+    for v in SOCKETS CORES MEM; do
+        [[ "${!v}" =~ ^[1-9][0-9]*$ ]] || die "Invalid $v '${!v}' in config. Use a whole number above 0."
+    done
+    [[ "$BALLOON" =~ ^[0-9]+$ ]] || die "Invalid BALLOON '$BALLOON' in config. Use a whole number (0 = off)."
+    (( BALLOON <= MEM )) || die "BALLOON ($BALLOON MB) can't be more than MEM ($MEM MB)."
+}
+
+_prompt_cpu_mem() {
+    local host_cpus host_mem_mb numa_nodes
+    host_cpus="$(nproc)"
+    host_mem_mb=$(( $(awk '/^MemTotal:/ {print $2}' /proc/meminfo) / 1024 ))
+    numa_nodes="$(_host_numa_nodes)"
+
+    echo ""
+    echo "CPU and memory. This host has ${host_cpus} CPU threads, ${host_mem_mb} MB RAM"
+    echo "and ${numa_nodes} NUMA node$( (( numa_nodes > 1 )) && echo s)."
+
+    # --- Sockets (NUMA hosts only) ---
+    if (( numa_nodes > 1 )); then
+        echo ""
+        echo "This host is NUMA (several CPU sockets, each with its own RAM)."
+        echo "  1 socket   Best for small VMs."
+        echo "  ${numa_nodes} sockets  For big VMs: spreads over every node, NUMA on."
+        _read_number "CPU sockets" "$SOCKETS" 1 "$numa_nodes"
+        SOCKETS="$NUM"
+    else
+        SOCKETS=1
+    fi
+
+    # --- Cores ---
+    _read_number "CPU cores$( (( SOCKETS > 1 )) && echo " per socket")" "$CORES" 1 $(( host_cpus / SOCKETS ))
+    CORES="$NUM"
+
+    # --- Memory ---
+    _read_number "Memory in MB" "$MEM" 512 "$host_mem_mb"
+    MEM="$NUM"
+
+    # --- Ballooning ---
+    echo ""
+    echo "Ballooning lets Proxmox take back unused RAM when the host runs low."
+    local b_def="Y" b_hint="Y/n"
+    [[ "$BALLOON" == "0" ]] && b_def="N" && b_hint="y/N"
+    read -rp "Use memory ballooning? (${b_hint}): " input
+    if [[ "${input:-$b_def}" =~ ^[Yy]$ ]]; then
+        local floor="$BALLOON"
+        (( floor == 0 )) && floor=$(( MEM / 2 ))
+        _read_number "Minimum memory in MB (the VM never drops below this)" "$floor" 256 "$MEM"
+        BALLOON="$NUM"
+    else
+        BALLOON=0
+    fi
+    info "CPU: $(_cpu_summary)"
+    info "Memory: $(_mem_summary)"
+}
+
+# =============================================================================
 #  REMAINING QUESTIONS
 #  Tip: at any prompt showing [a value], press Enter to keep it.
 # =============================================================================
@@ -1084,6 +1216,7 @@ user_prompts() {
             || die "Invalid tags '$TAG'. Use letters, digits, '_', '-', '+', '.', separated by ';'."
         [[ "$CI_UPGRADE" =~ ^[01]$ ]] \
             || die "Invalid CI_UPGRADE '$CI_UPGRADE' in config. Use 1 (yes) or 0 (no)."
+        _validate_cpu_mem
         CLOUD_USER="${CLOUD_USER_DEFAULT}"
         CLOUD_PASSWORD="${CLOUD_PASSWORD_DEFAULT}"
         PASSWORD_GENERATED="yes"
@@ -1192,6 +1325,8 @@ user_prompts() {
     _read_index "Select CPU type" "${#cpu_options[@]}" "$default_cpu_num"
     CPU_TYPE="${cpu_options[$((PICK - 1))]}"
     info "CPU type set to: $CPU_TYPE"
+
+    _prompt_cpu_mem
 
     # --- Package upgrades on first boot (Proxmox "Upgrade packages") ---
     echo ""
@@ -1346,7 +1481,9 @@ create_vm() {
         --name       "$TEMPL_NAME" \
         --memory     "$MEM" \
         --balloon    "$BALLOON" \
+        --sockets    "$SOCKETS" \
         --cores      "$CORES" \
+        --numa       "$(_numa_flag)" \
         --cpu        "$CPU_TYPE" \
         --bios       "$BIOS" \
         --machine    "$MACHINE" \
@@ -1364,11 +1501,6 @@ create_vm() {
     # From here on, a failure removes this VM automatically.
     VMID_CREATED="$VMID"
 
-    # ZFS has its own cache (ARC). A host cache on top double-buffers,
-    # so use cache=none there and writethrough elsewhere.
-    local disk_cache="writethrough"
-    [[ "$STORAGE_TYPE" == "zfspool" ]] && disk_cache="none"
-
     local fmt_opt=""
     [[ -n "$STORAGE_FORMAT" ]] && fmt_opt=",format=${STORAGE_FORMAT}"
 
@@ -1376,7 +1508,7 @@ create_vm() {
     # 'vm-<id>-disk-0' (which breaks if an old orphaned disk has that name).
     info "Importing disk (format: ${STORAGE_FORMAT:-auto})..."
     qm set "$VMID" \
-        --scsi0    "${DISK_STOR}:0,import-from=${WORK_DIR}/${DISK_IMAGE}${fmt_opt},cache=${disk_cache},discard=on,iothread=1,ssd=1" \
+        --scsi0    "${DISK_STOR}:0,import-from=${WORK_DIR}/${DISK_IMAGE}${fmt_opt},cache=${DISK_CACHE},discard=on,iothread=1,ssd=1" \
         --scsi1    "${DISK_STOR}:cloudinit" \
         --efidisk0 "${DISK_STOR}:0,efitype=4m${fmt_opt},ms-cert=2023k,pre-enrolled-keys=1,size=1M" \
         --boot     "order=scsi0"
@@ -1408,7 +1540,11 @@ _vm_description() {
 
 **Storage:** ${DISK_STOR} (${STORAGE_TYPE}/${STORAGE_FORMAT:-auto})
 
-**CPU type:** ${CPU_TYPE}
+**CPU:** $(_cpu_summary)
+
+**Memory:** $(_mem_summary)
+
+**Disk cache:** ${DISK_CACHE}
 
 **Cloud-Init user:** ${CLOUD_USER}
 
@@ -1602,6 +1738,7 @@ DISK_STOR=$(_conf_val "$DISK_STOR")
 
 # --- VM hardware ---
 VMID_DEFAULT=$(_conf_val "$VMID_DEFAULT")
+SOCKETS=$(_conf_val "$SOCKETS")
 CORES=$(_conf_val "$CORES")
 MEM=$(_conf_val "$MEM")
 BALLOON=$(_conf_val "$BALLOON")
@@ -1674,9 +1811,6 @@ print_summary() {
         *)   templ_str="Ask me at the end" ;;
     esac
 
-    local cache_display="writethrough"
-    [[ "$STORAGE_TYPE" == "zfspool" ]] && cache_display="none (ZFS)"
-
     local snippet_display="(none)"
     [[ "$SNIPPETS_ENABLED" == "yes" ]] && snippet_display="${SNIPPETS_STOR}:snippets/${SNIPPETS_FILE}"
 
@@ -1684,11 +1818,11 @@ print_summary() {
     _row "OS:"                  "$OS_NAME"
     _row "VM ID:"               "$VMID${OVERWRITE_VMID:+ (REPLACES the existing template)}"
     _row "Template name:"       "$TEMPL_NAME"
-    _row "Storage:"             "$DISK_STOR ($STORAGE_TYPE / ${STORAGE_FORMAT:-auto}, cache=$cache_display)"
+    _row "Storage:"             "$DISK_STOR ($STORAGE_TYPE / ${STORAGE_FORMAT:-auto}, cache=$DISK_CACHE)"
     _row "Disk size:"           "$DISK_SIZE"
-    _row "CPUs / RAM:"          "$CORES cores / ${MEM}MB (balloon: ${BALLOON}MB)"
+    _row "CPU:"                 "$(_cpu_summary)"
+    _row "Memory:"              "$(_mem_summary)"
     _row "BIOS / Machine:"      "$BIOS / $MACHINE"
-    _row "CPU type:"            "$CPU_TYPE"
     _row "Network:"             "$NET_BRIDGE${VLAN:+ (VLAN $VLAN)}"
     _row "Tags:"                "$TAG"
     _row "Cloud-Init user:"     "$CLOUD_USER"
