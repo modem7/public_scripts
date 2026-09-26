@@ -544,21 +544,39 @@ next_free_vmid() {
     echo "$id"
 }
 
-# Only called when --force-overwrite is set AND all safety checks passed.
-destroy_existing_template() {
+# --force-overwrite is split in two steps, so the old template survives
+# if you cancel at the summary or the download/customise step fails:
+#   1. _check_overwrite     early: safety checks + your confirmation
+#   2. replace_old_template late:  re-check, countdown, destroy
+OVERWRITE_VMID=""
+
+# Dies unless the VM is a stopped template on this node.
+_assert_overwritable() {
+    local id="$1"
+    [[ -f "$(_local_vm_conf "$id")" ]] \
+        || die "ID $id belongs to a container or a VM on another node. --force-overwrite only replaces VM templates on this node."
+    vmid_is_running "$id" \
+        && die "VM $id is running. Stop it before overwriting."
+    vmid_is_template "$id" \
+        || die "VM $id ('$(vmid_name "$id")') is not a template. --force-overwrite only replaces templates, to protect normal VMs."
+    return 0
+}
+
+_check_overwrite() {
     local id="$1" name
+    _assert_overwritable "$id"
     name="$(vmid_name "$id")"
 
     echo ""
     warn "OVERWRITE REQUESTED"
-    warn "This will permanently destroy VM $id ('${name}') and all its disks."
-    warn "This cannot be undone."
+    warn "VM $id ('${name}') and all its disks will be destroyed and rebuilt."
+    warn "This happens after the new image is ready. It cannot be undone."
     echo ""
 
     if [[ "$UNATTENDED" == "yes" ]]; then
         # Earlier checks guarantee I_KNOW=yes here; re-check anyway.
         [[ "$I_KNOW" == "yes" ]] || die "Unattended overwrite requires --i-know-what-i-am-doing."
-        warn "Confirmed via --i-know-what-i-am-doing. Press Ctrl+C to abort."
+        info "Confirmed via --i-know-what-i-am-doing."
     else
         # Unnamed VMs are confirmed by ID, so an empty Enter can never match.
         local expected="${name:-$id}" what="name"
@@ -568,13 +586,26 @@ destroy_existing_template() {
         echo ""
         read -rp "  Type the VM ${what} to confirm destruction: " confirm
         [[ "$confirm" == "$expected" ]] || die "The ${what} did not match. Aborting overwrite."
-        warn "Last chance: press Ctrl+C to abort."
     fi
-    _countdown "Destroying"
+    OVERWRITE_VMID="$id"
+}
 
-    echo ""
-    qm destroy "$id" --destroy-unreferenced-disks 1 --purge 1
-    success "VM $id destroyed."
+# Runs just before create_vm. The VM may have changed in the meantime,
+# so every safety check runs again.
+replace_old_template() {
+    [[ -n "$OVERWRITE_VMID" ]] || return 0
+    header "Replace Existing Template"
+
+    if ! vmid_exists "$OVERWRITE_VMID"; then
+        info "VM $OVERWRITE_VMID no longer exists. Nothing to destroy."
+        return
+    fi
+    _assert_overwritable "$OVERWRITE_VMID"
+
+    warn "Destroying VM $OVERWRITE_VMID. Press Ctrl+C to abort."
+    _countdown "Destroying"
+    qm destroy "$OVERWRITE_VMID" --destroy-unreferenced-disks 1 --purge 1
+    success "VM $OVERWRITE_VMID destroyed."
 }
 
 get_valid_vmid() {
@@ -604,14 +635,8 @@ get_valid_vmid() {
         elif ! vmid_exists "$VMID"; then
             break
         elif [[ "$FORCE_OVERWRITE" == "yes" ]]; then
-            # Overwrite path: local, stopped templates only.
-            [[ -f "$(_local_vm_conf "$VMID")" ]] \
-                || die "ID $VMID belongs to a container or a VM on another node. --force-overwrite only replaces VM templates on this node."
-            vmid_is_running "$VMID" \
-                && die "VM $VMID is running. Stop it before overwriting."
-            vmid_is_template "$VMID" \
-                || die "VM $VMID ('$(vmid_name "$VMID")') is not a template. --force-overwrite only replaces templates, to protect normal VMs."
-            destroy_existing_template "$VMID"
+            # Confirm now; the actual destroy waits until the image is ready.
+            _check_overwrite "$VMID"
             break
         elif [[ "$AUTO_VMID" == "yes" ]]; then
             local original="$VMID"
@@ -1146,7 +1171,9 @@ customize_image() {
 datasource_list: [ NoCloud, ConfigDrive ]
 EOF
 
+    # Strip spaces: older profiles saved lists like "curl, git".
     local all_pkgs="$VIRT_PKGS${EXTRA_VIRT_PKGS:+,$EXTRA_VIRT_PKGS}"
+    all_pkgs="${all_pkgs//[[:space:]]/}"
     local vc_args=(
         -a "$image_path"
         --update
@@ -1510,7 +1537,7 @@ print_summary() {
 
     _row() { printf "  %-22s %s\n" "$1" "$2"; }
     _row "OS:"                  "$OS_NAME"
-    _row "VM ID:"               "$VMID"
+    _row "VM ID:"               "$VMID${OVERWRITE_VMID:+ (REPLACES the existing template)}"
     _row "Template name:"       "$TEMPL_NAME"
     _row "Storage:"             "$DISK_STOR ($STORAGE_TYPE / ${STORAGE_FORMAT:-auto}, cache=$cache_display)"
     _row "Disk size:"           "$DISK_SIZE"
@@ -1565,6 +1592,7 @@ main() {
     customize_image
 
     # 3. Build the VM
+    replace_old_template
     create_vm
     apply_ssh_key
     apply_snippets
