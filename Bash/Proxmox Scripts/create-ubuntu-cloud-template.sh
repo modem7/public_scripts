@@ -1212,8 +1212,9 @@ _valid_vlan() {
 
 # Unattended: check network and disk values from the profile before any work.
 _validate_net_disk() {
-    [[ -e "/sys/class/net/${NET_BRIDGE}" ]] \
-        || die "Bridge '$NET_BRIDGE' (NET_BRIDGE in config) does not exist on this host. Found: $(_host_bridges | tr '\n' ' ')"
+    # Must be one of this host's bridges (not empty, not a plain NIC like eth0).
+    _host_bridges | grep -qxF -- "$NET_BRIDGE" \
+        || die "Bridge '$NET_BRIDGE' (NET_BRIDGE in config) is not a bridge on this host. Found: $(_host_bridges | tr '\n' ' ')"
     _valid_vlan "$VLAN" || die "Invalid VLAN '$VLAN' in config. Use 1-4094, or empty for none."
     [[ "$DISK_SIZE" =~ ^[0-9]+G$ ]] && (( 10#${DISK_SIZE%G} >= 4 )) \
         || die "Invalid DISK_SIZE '$DISK_SIZE' in config. Use a number of GB followed by G, at least 4G (e.g. 15G)."
