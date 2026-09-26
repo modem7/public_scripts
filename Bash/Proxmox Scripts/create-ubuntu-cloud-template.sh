@@ -392,8 +392,53 @@ install_packages() {
 #  The list is read live from cloud-images.ubuntu.com, so new releases
 #  appear without editing this script.
 # =============================================================================
+# Codename -> version number and support status, e.g.
+#   RELEASE_VER[noble]="24.04 LTS"   RELEASE_STATUS[noble]=""
+#   RELEASE_VER[focal]="20.04 LTS"   RELEASE_STATUS[focal]="end of life"
+# Read from Ubuntu's release lists (the same ones do-release-upgrade uses).
+# Optional: if they can't be fetched, only codenames are shown.
+declare -A RELEASE_VER=() RELEASE_STATUS=()
+
+_load_release_info() {
+    local dist ver status
+    while IFS='|' read -r dist ver status; do
+        [[ -n "$dist" && -n "$ver" ]] || continue
+        RELEASE_VER["$dist"]="$ver"
+        RELEASE_STATUS["$dist"]="$status"
+    done < <(
+        {
+            wget -qO- --timeout=10 "https://changelogs.ubuntu.com/meta-release" || true
+            echo "Source: development"
+            wget -qO- --timeout=10 "https://changelogs.ubuntu.com/meta-release-development" || true
+        } | awk -v now="$(date +%Y%m)" '
+            # Records are blank-line separated. First entry per codename wins,
+            # and the released list is read before the development one.
+            function flush() {
+                if (dist != "" && ver != "" && !(dist in seen)) {
+                    split(ver, p, ".")                  # 24.04.5 -> 24.04
+                    status = dev ? "in development" : (sup == "0" ? "end of life" : "")
+                    # Ubuntu lists old LTS releases as supported because of paid
+                    # ESM. Free support lasts 5 years, to the end of May.
+                    if (status == "" && lts && now > (2000 + p[1] + 5) * 100 + 5)
+                        status = "Ubuntu Pro only"
+                    print dist "|" p[1] "." p[2] (lts ? " LTS" : "") "|" status
+                    seen[dist] = 1
+                }
+                dist = ""; ver = ""; sup = ""; lts = 0
+            }
+            /^Source: development/ { flush(); dev = 1; next }
+            /^Dist: /      { dist = $2 }
+            /^Version: /   { ver = $2; lts = ($3 == "LTS") }
+            /^Supported: / { sup = $2 }
+            /^[[:space:]]*$/ { flush() }
+            END { flush() }'
+    )
+}
+
 select_ubuntu_version() {
     header "Ubuntu Version Selection"
+
+    _load_release_info
 
     if [[ -n "${DISTRO_VER:-}" ]]; then
         [[ "$DISTRO_VER" =~ ^[a-z]+$ ]] || die "Invalid DISTRO_VER in config: '$DISTRO_VER'"
@@ -406,24 +451,33 @@ select_ubuntu_version() {
 
     # Every codename folder is checked for a current amd64 image.
     # Checks run 8 at a time; doing them one by one is slow.
-    local version_list=()
-    mapfile -t version_list < <(
+    local codenames=()
+    mapfile -t codenames < <(
         wget -qO- "https://cloud-images.ubuntu.com/" \
         | grep -oP 'href="\K[a-z]+(?=/")' \
         | sort -u \
         | xargs -r -P 8 -n 1 sh -c \
-            'wget -q --spider "https://cloud-images.ubuntu.com/$1/current/$1-server-cloudimg-amd64.img" && echo "$1"' _ \
-        | sort
+            'wget -q --spider "https://cloud-images.ubuntu.com/$1/current/$1-server-cloudimg-amd64.img" && echo "$1"' _
     ) || true
 
-    [[ ${#version_list[@]} -gt 0 ]] \
+    [[ ${#codenames[@]} -gt 0 ]] \
         || die "Could not fetch Ubuntu versions from cloud-images.ubuntu.com. Check your internet connection."
+
+    # Oldest to newest by version number. Unknown versions go last.
+    local version_list=() c
+    mapfile -t version_list < <(
+        for c in "${codenames[@]}"; do
+            printf '%s %s\n' "${RELEASE_VER[$c]:-99.99}" "$c"
+        done | sort -V | awk '{print $NF}'
+    )
 
     echo ""
     echo "Available Ubuntu versions:"
-    local i
+    local i note
     for i in "${!version_list[@]}"; do
-        echo "  $((i + 1))) ${version_list[$i]}"
+        c="${version_list[$i]}"
+        note="${RELEASE_STATUS[$c]:-}"
+        printf "  %d) %-10s %-10s %s\n" "$((i + 1))" "$c" "${RELEASE_VER[$c]:-}" "${note:+($note)}"
     done
     echo ""
 
@@ -451,8 +505,17 @@ _set_distro_vars() {
     CHECKSUM_URL="https://cloud-images.ubuntu.com/${DISTRO_VER}/current/SHA256SUMS"
     # Keep a template name loaded from a profile.
     TEMPL_NAME_DEFAULT="${TEMPL_NAME_DEFAULT:-ubuntu-${DISTRO_VER}-cloud-template}"
-    OS_NAME="Ubuntu ${DISTRO_VER^}"
+    # e.g. "Ubuntu 24.04 LTS (Noble)", or "Ubuntu Noble" if the version is unknown.
+    local ver="${RELEASE_VER[$DISTRO_VER]:-}"
+    OS_NAME="Ubuntu ${ver:+$ver (}${DISTRO_VER^}${ver:+)}"
     success "Selected: $OS_NAME"
+    [[ "${RELEASE_STATUS[$DISTRO_VER]:-}" == "end of life" ]] \
+        && warn "$OS_NAME is end of life and no longer gets security updates."
+    [[ "${RELEASE_STATUS[$DISTRO_VER]:-}" == "Ubuntu Pro only" ]] \
+        && warn "$OS_NAME only gets security updates with an Ubuntu Pro subscription."
+    [[ "${RELEASE_STATUS[$DISTRO_VER]:-}" == "in development" ]] \
+        && warn "$OS_NAME is a development release. Expect breakage."
+    return 0
 }
 
 # =============================================================================
