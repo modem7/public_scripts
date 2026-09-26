@@ -89,6 +89,10 @@ VLAN=""                  # blank = untagged
 AGENT_ENABLE="1"
 FSTRIM="1"               # trim disk after cloning
 
+# Upgrade packages on a clone's first boot? 1 = yes, 0 = no.
+# Same as "Upgrade packages" in the Proxmox Cloud-Init tab (can be changed there per VM).
+CI_UPGRADE="0"
+
 # CPU type
 #   host   Best performance. Right for most homelabs (same CPU on every node).
 #   kvm64  Use for live migration between nodes with different CPUs.
@@ -943,15 +947,15 @@ _prompt_snippets() {
         return
     fi
 
-    echo "  A snippet adds first-boot steps to every clone:"
-    echo "    - Update and upgrade all packages"
+    echo "  A snippet is a file for your own first-boot settings on every clone"
+    echo "  (e.g. extra packages or commands). It starts with examples to edit."
     if [[ -z "${SSH_KEY:-}" ]]; then
-        echo "    - Allow SSH login with a password (you set no SSH key,"
-        echo "      and Ubuntu cloud images only allow key login by default)"
+        echo "  It will also allow SSH login with a password, because you set no"
+        echo "  SSH key and Ubuntu cloud images only allow key login by default."
     fi
     echo ""
-    echo "  Not needed for SSH keys or disk resizing: Proxmox and cloud-init"
-    echo "  already handle those. You can edit the file afterwards."
+    echo "  Not needed for SSH keys, disk resizing or package upgrades:"
+    echo "  Proxmox and cloud-init already handle those."
     echo ""
     read -rp "Create a snippet? (y/N): " choice
     if [[ ! "${choice:-N}" =~ ^[Yy]$ ]]; then
@@ -1013,23 +1017,24 @@ apply_snippets() {
 #
 # Examples: https://cloudinit.readthedocs.io/en/latest/reference/examples.html
 
-# Not needed here (cloud-init already does these):
-#   - SSH keys from the Cloud-Init tab.
-#   - Growing the root disk. Runs on every boot, so later resizes work too.
+# Not needed here (Proxmox / cloud-init already do these):
+#   - SSH keys: Cloud-Init tab.
+#   - Package upgrades: Cloud-Init tab > "Upgrade packages".
+#   - Growing the root disk: runs on every boot, so later resizes work too.
 
 # SSH login with a password. Ubuntu cloud images allow key login only.
-# Uncomment if you log in with the Cloud-Init password instead of a key.
+# On only if no SSH key was set when this file was made.
 ${pwauth}
-
-# Update and upgrade packages on first boot.
-package_update: true
-package_upgrade: true
 
 # Extra packages on first boot. Uncomment and add as needed.
 # packages:
 #   - curl
 #   - git
 #   - vim
+
+# Commands to run once, on first boot. Uncomment and add as needed.
+# runcmd:
+#   - echo "hello from first boot" > /root/first-boot.txt
 
 # Logged to /var/log/cloud-init-output.log when done.
 final_message: |
@@ -1077,6 +1082,8 @@ user_prompts() {
             || die "Invalid template name '$TEMPL_NAME'. Use letters, digits, '-' and '.' only."
         _valid_tags "$TAG" \
             || die "Invalid tags '$TAG'. Use letters, digits, '_', '-', '+', '.', separated by ';'."
+        [[ "$CI_UPGRADE" =~ ^[01]$ ]] \
+            || die "Invalid CI_UPGRADE '$CI_UPGRADE' in config. Use 1 (yes) or 0 (no)."
         CLOUD_USER="${CLOUD_USER_DEFAULT}"
         CLOUD_PASSWORD="${CLOUD_PASSWORD_DEFAULT}"
         PASSWORD_GENERATED="yes"
@@ -1185,6 +1192,16 @@ user_prompts() {
     _read_index "Select CPU type" "${#cpu_options[@]}" "$default_cpu_num"
     CPU_TYPE="${cpu_options[$((PICK - 1))]}"
     info "CPU type set to: $CPU_TYPE"
+
+    # --- Package upgrades on first boot (Proxmox "Upgrade packages") ---
+    echo ""
+    echo "Upgrade all packages when a clone first boots?"
+    echo "Slower first boot, but clones start fully patched."
+    local up_def="N" up_hint="y/N"
+    [[ "$CI_UPGRADE" == "1" ]] && up_def="Y" && up_hint="Y/n"
+    read -rp "Upgrade packages on first boot? (${up_hint}): " input
+    [[ "${input:-$up_def}" =~ ^[Yy]$ ]] && CI_UPGRADE="1" || CI_UPGRADE="0"
+    info "Upgrade on first boot: $([[ "$CI_UPGRADE" == "1" ]] && echo yes || echo no)"
 
     _prompt_snippets
 }
@@ -1343,7 +1360,7 @@ create_vm() {
         --ipconfig0  "ip=dhcp" \
         --ciuser     "$CLOUD_USER" \
         --cipassword "$CLOUD_PASSWORD" \
-        --ciupgrade  "0"
+        --ciupgrade  "$CI_UPGRADE"
     # From here on, a failure removes this VM automatically.
     VMID_CREATED="$VMID"
 
@@ -1374,10 +1391,15 @@ set_vm_description() {
 }
 
 _vm_description() {
-    local upgrade_note="> **Package upgrades on first boot are off** (\`ciupgrade=0\`).
-> Upgrade after cloning, or with your config management tool."
-    [[ "$SNIPPETS_ENABLED" == "yes" ]] && upgrade_note="> **First boot runs the snippet** \`${SNIPPETS_STOR}:snippets/${SNIPPETS_FILE}\`
-> (package upgrade$([[ -z "${SSH_KEY:-}" ]] && echo " + SSH password login"))."
+    local upgrade_note="> **Package upgrades on first boot are off.**
+> Turn on in Cloud-Init > Upgrade packages, or upgrade after cloning."
+    [[ "$CI_UPGRADE" == "1" ]] && upgrade_note="> **Packages are upgraded on first boot.**
+> Turn off in Cloud-Init > Upgrade packages."
+
+    local snippet_note=""
+    [[ "$SNIPPETS_ENABLED" == "yes" ]] && snippet_note="
+> **First boot also runs the snippet** \`${SNIPPETS_STOR}:snippets/${SNIPPETS_FILE}\`$([[ -z "${SSH_KEY:-}" ]] && echo "
+> (includes SSH password login).")"
 
     cat <<EOF
 **OS:** ${OS_NAME}
@@ -1400,6 +1422,7 @@ _vm_description() {
 > in \`/etc/ssh/sshd_config\` after first boot.
 
 ${upgrade_note}
+${snippet_note}
 
 ---
 
@@ -1592,6 +1615,9 @@ VLAN=$(_conf_val "$VLAN")
 AGENT_ENABLE=$(_conf_val "$AGENT_ENABLE")
 FSTRIM=$(_conf_val "$FSTRIM")
 
+# --- Upgrade packages on first boot? 1 = yes, 0 = no ---
+CI_UPGRADE=$(_conf_val "$CI_UPGRADE")
+
 # --- Cloud-init snippet ---
 # Storage to write the snippet to. Empty = no snippet in unattended runs,
 # and you are asked in interactive runs.
@@ -1670,6 +1696,7 @@ print_summary() {
     _row "Extra packages:"      "${EXTRA_VIRT_PKGS:-(none)}"
     _row "Snippet:"             "$snippet_display"
     _row "Timezone:"            "$TZ"
+    _row "Upgrade on 1st boot:" "$([[ "$CI_UPGRADE" == "1" ]] && echo Yes || echo No)"
     _row "Convert to template:" "$templ_str"
     echo ""
 
