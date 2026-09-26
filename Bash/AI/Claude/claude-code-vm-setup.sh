@@ -54,6 +54,8 @@
 #    CLAUDE_EMAIL     pre-fills the Claude sign-in page
 #    REMOTE_CONTROL_ARGS  extra flags for `claude remote-control`
 #                         (e.g. "--spawn worktree")
+#    ALLOW_NO_AVX2    continue on an x86-64 CPU without AVX2 (Claude Code
+#                     hangs there; normally a VM CPU-type setting)
 #    GITHUB_SSH_KEY   (default ~/.ssh/id_ed25519_github — a dedicated key,
 #                      wired to github.com via ~/.ssh/config)
 # ============================================================================
@@ -240,7 +242,26 @@ preflight() {
   fi
 
   DPKG_ARCH=$(dpkg --print-architecture)
+  check_cpu
   detect_shell
+}
+
+# Claude Code's Linux build is compiled with Bun, which needs AVX2 on x86-64.
+# Without it the CLI doesn't fail cleanly — commands like `claude auth status`
+# spin at 100% CPU forever. The usual cause is a hypervisor CPU model that
+# hides host features (e.g. Proxmox's default x86-64-v2-AES), so catch it
+# here, before anything is installed.
+check_cpu() {
+  [[ "$DPKG_ARCH" == "amd64" ]] || return 0
+  grep -qw avx2 /proc/cpuinfo && return 0
+  local model; model=$(awk -F': ' '/^model name/{print $2; exit}' /proc/cpuinfo)
+  if is_true "${ALLOW_NO_AVX2:-false}"; then
+    warn "This CPU (${model:-unknown}) doesn't expose AVX2; continuing because ALLOW_NO_AVX2 is set. Claude Code will likely hang."
+    return 0
+  fi
+  error "This CPU (${model:-unknown}) doesn't expose AVX2, which Claude Code needs on x86-64 (without it the CLI hangs at 100% CPU).
+        On a VM, set the CPU type to 'host' (Proxmox: Hardware > Processor > Type, or at least x86-64-v3),
+        then fully stop and start the VM, since a guest reboot isn't enough. To continue anyway: ALLOW_NO_AVX2=1"
 }
 
 # Works out which rc file(s) get the environment block. The login shell comes
