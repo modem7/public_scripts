@@ -150,11 +150,30 @@ _read_index() {
     while true; do
         read -rp "${prompt}${def:+ [$def]}: " ans
         ans="${ans:-$def}"
-        if [[ "$ans" =~ ^[0-9]+$ ]] && (( ans >= 1 && ans <= max )); then
-            PICK="$ans"
+        # 10# = base 10, so "08" isn't read as (invalid) octal.
+        if [[ "$ans" =~ ^[0-9]+$ ]] && (( 10#$ans >= 1 && 10#$ans <= max )); then
+            PICK=$((10#$ans))
             return
         fi
         warn "Enter a number from 1 to $max."
+    done
+}
+
+# Proxmox VM names must be DNS-style: letters, digits, '-' and '.'.
+# (No underscores or spaces.) Checked early, so a bad name can't fail
+# 'qm create' after a long download or after an old template is destroyed.
+_valid_vm_name() {
+    local label='[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?'
+    [[ ${#1} -le 63 && "$1" =~ ^(${label}\.)*${label}$ ]]
+}
+
+# Proxmox tags: letters, digits, '_', '-', '+', '.'. Separated by ';'.
+_valid_tags() {
+    local -a tags
+    local t
+    IFS=';, ' read -ra tags <<< "$1"
+    for t in "${tags[@]}"; do
+        [[ "$t" =~ ^[A-Za-z0-9_][A-Za-z0-9_+.-]*$ ]] || return 1
     done
 }
 
@@ -291,6 +310,9 @@ fi
 [[ -n "$VMID_FLAG" && ! "$VMID_FLAG" =~ ^[1-9][0-9]{2,8}$ ]] \
     && die "--vmid must be a number from 100 to 999999999."
 
+[[ -n "$_CLI_TEMPL_NAME" ]] && ! _valid_vm_name "$_CLI_TEMPL_NAME" \
+    && die "Invalid --name '$_CLI_TEMPL_NAME'. Use letters, digits, '-' and '.' only."
+
 # CLI beats profile.
 CONVERT_TO_TEMPLATE="${_CLI_CONVERT_TO_TEMPLATE:-${CONVERT_TO_TEMPLATE:-}}"
 [[ -n "$_CLI_TEMPL_NAME" ]] && TEMPL_NAME="$_CLI_TEMPL_NAME"
@@ -409,8 +431,8 @@ select_ubuntu_version() {
     local selected="" choice v
     while [[ -z "$selected" ]]; do
         read -rp "Select a version (number or codename): " choice
-        if [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#version_list[@]} )); then
-            selected="${version_list[$((choice - 1))]}"
+        if [[ "$choice" =~ ^[0-9]+$ ]] && (( 10#$choice >= 1 && 10#$choice <= ${#version_list[@]} )); then
+            selected="${version_list[$((10#$choice - 1))]}"
         else
             for v in "${version_list[@]}"; do
                 [[ "$v" == "$choice" ]] && selected="$v" && break
@@ -976,6 +998,10 @@ user_prompts() {
     # Unattended: everything comes from the profile. Password is generated.
     if [[ "$UNATTENDED" == "yes" ]]; then
         TEMPL_NAME="${TEMPL_NAME:-$TEMPL_NAME_DEFAULT}"
+        _valid_vm_name "$TEMPL_NAME" \
+            || die "Invalid template name '$TEMPL_NAME'. Use letters, digits, '-' and '.' only."
+        _valid_tags "$TAG" \
+            || die "Invalid tags '$TAG'. Use letters, digits, '_', '-', '+', '.', separated by ';'."
         CLOUD_USER="${CLOUD_USER_DEFAULT}"
         CLOUD_PASSWORD="${CLOUD_PASSWORD_DEFAULT}"
         PASSWORD_GENERATED="yes"
@@ -991,9 +1017,15 @@ user_prompts() {
 
     # --- Name ---
     if [[ -z "${TEMPL_NAME:-}" ]]; then
-        read -rp "Template name [${TEMPL_NAME_DEFAULT}]: " input
-        TEMPL_NAME="${input:-$TEMPL_NAME_DEFAULT}"
+        while true; do
+            read -rp "Template name [${TEMPL_NAME_DEFAULT}]: " input
+            TEMPL_NAME="${input:-$TEMPL_NAME_DEFAULT}"
+            _valid_vm_name "$TEMPL_NAME" && break
+            warn "Use letters, digits, '-' and '.' only (no spaces or underscores)."
+        done
     else
+        _valid_vm_name "$TEMPL_NAME" \
+            || die "Invalid --name '$TEMPL_NAME'. Use letters, digits, '-' and '.' only."
         info "Using template name from --name flag: $TEMPL_NAME"
     fi
 
@@ -1017,8 +1049,12 @@ user_prompts() {
         read -rp "VLAN tag, 1-4094 ('-' for none) [${VLAN:-none}]: " input
         [[ "$input" == "-" ]] && { VLAN=""; break; }
         input="${input:-$VLAN}"
-        if [[ -z "$input" ]] || { [[ "$input" =~ ^[0-9]+$ ]] && (( input >= 1 && input <= 4094 )); }; then
-            VLAN="$input"
+        if [[ -z "$input" ]]; then
+            VLAN=""
+            break
+        fi
+        if [[ "$input" =~ ^[0-9]+$ ]] && (( 10#$input >= 1 && 10#$input <= 4094 )); then
+            VLAN=$((10#$input))
             break
         fi
         warn "VLAN must be a number from 1 to 4094."
@@ -1031,17 +1067,24 @@ user_prompts() {
         read -rp "Disk size in GB, numbers only [${disk_default_num}]: " input
         input="${input//[^0-9]/}"
         input="${input:-$disk_default_num}"
-        (( input >= 4 )) && break
+        [[ -n "$input" ]] && (( 10#$input >= 4 )) && break
         warn "Use at least 4 GB (the Ubuntu image itself is about 3.5 GB)."
     done
-    DISK_SIZE="${input}G"
+    DISK_SIZE="$((10#$input))G"
     info "Disk size set to: $DISK_SIZE"
 
     # --- Tags ---
     echo ""
     echo "Tags help filter VMs in the Proxmox UI. Separate with ';' (e.g. template;ubuntu)."
-    read -rp "Tags [${TAG}]: " input
-    TAG="${input:-$TAG}"
+    while true; do
+        read -rp "Tags [${TAG}]: " input
+        input="${input:-$TAG}"
+        if _valid_tags "$input"; then
+            TAG="$input"
+            break
+        fi
+        warn "Tags may use letters, digits, '_', '-', '+' and '.' only."
+    done
 
     # --- CPU type ---
     echo ""
@@ -1306,8 +1349,8 @@ apply_ssh_key() {
     [[ -n "${SSH_KEY:-}" ]] || return 0
     header "SSH Key"
 
-    # Old profiles may store "github.com/<user>" instead of the key itself.
-    # Fetch the real keys now; the profile is updated at the end of the run.
+    # SSH_KEY may be "github.com/<user>" instead of the key itself.
+    # Fetch the current keys from GitHub on every run.
     if [[ "$SSH_KEY" == github.com/* ]]; then
         local gh_user="${SSH_KEY#github.com/}" keys
         info "Config has a GitHub reference. Fetching keys for: $gh_user"
