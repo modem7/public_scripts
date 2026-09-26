@@ -1,104 +1,143 @@
 #!/bin/bash
 # =============================================================================
-# Proxmox Ubuntu Cloud-Init Template Creator
+#  Proxmox Ubuntu Cloud-Init Template Creator
 # =============================================================================
-# Creates a cloud-init ready Ubuntu VM template on Proxmox VE.
-# Supports ZFS (raw), LVM-thin (raw), and directory (qcow2) storage backends.
 #
-# Usage:
-#   ./create-ubuntu-cloud-template.sh [OPTIONS]
+#  Author:   Alex Lane (modem7) - https://github.com/modem7
+#  Licence:  MIT - Copyright (c) 2026 Alex Lane
+#            Free to use, change and share. Keep this notice.
+#            Provided as-is, with no warranty. Full text:
+#            https://github.com/modem7/public_scripts/blob/master/LICENSE
+#  Repo:     https://github.com/modem7/public_scripts
+#  Latest:   https://github.com/modem7/public_scripts/blob/master/Bash/Proxmox%20Scripts/create-ubuntu-cloud-template.sh
+#  Issues:   https://github.com/modem7/public_scripts/issues
+#  Support:  https://www.buymeacoffee.com/modem7
 #
-# Run with --help to see all available options and examples.
+#  SPDX-License-Identifier: MIT
 #
-# Quick start:
-#   First run:  answer the prompts, save a named profile at the end.
-#   Repeat run: ./create-ubuntu-cloud-template.sh --config <profile>.conf
-#   Automated:  ./create-ubuntu-cloud-template.sh --config <profile>.conf \
-#                  --unattended --vmid <id> [--template] [--force-overwrite \
-#                  --i-know-what-i-am-doing]
+#  WHAT IT DOES
+#    Builds a ready-to-clone Ubuntu VM template on a Proxmox VE host.
+#    1. Downloads the official Ubuntu cloud image (SHA256 verified).
+#    2. Bakes in the qemu-guest-agent plus any extra packages you choose.
+#    3. Creates the VM, attaches the disk + cloud-init drive.
+#    4. Optionally converts it to a template.
 #
-# VM ID selection:
-#   --auto-vmid alone:        finds the next free ID from 100 upwards.
-#   --vmid <id> --auto-vmid:  tries <id> first, then increments from there
-#                              if taken. Use this to control which range your
-#                              templates live in (e.g. --vmid 52000 --auto-vmid
-#                              keeps templates in the 52000+ range).
-#   --vmid <id> alone:        uses exactly <id>, fails if already taken.
+#  REQUIREMENTS
+#    - Run as root on a Proxmox VE host.
+#    - Internet access (cloud-images.ubuntu.com, optionally github.com).
+#    - Missing host packages are offered for install automatically.
+#
+#  QUICK START
+#    First run    ./create-ubuntu-cloud-template.sh
+#                 Answer the prompts. Save a profile when asked.
+#
+#    Re-run       ./create-ubuntu-cloud-template.sh --config <profile>.conf
+#
+#    Automated    ./create-ubuntu-cloud-template.sh --config <profile>.conf \
+#                     --unattended --vmid 52000 --auto-vmid --template
+#
+#    All options  ./create-ubuntu-cloud-template.sh --help
+#
+#  VM ID CHEAT SHEET
+#    --vmid 52001               Use exactly 52001. Stop if taken.
+#    --auto-vmid                Next free ID, starting at 100.
+#    --vmid 52000 --auto-vmid   Next free ID, starting at 52000.
+#                               (Keeps templates in their own range.)
+#
+#  FILES IT CREATES
+#    <script dir>/<profile>.conf    Your saved answers (only if you say so).
+#    $WORK_DIR/*.img.pristine       Cached download. Skips re-downloading.
+#    <storage>/snippets/*.yaml      Optional cloud-init vendor-data snippet.
+#
+#  SAFETY
+#    - Never destroys anything unless you pass --force-overwrite.
+#    - Even then: templates only, never running VMs or normal VMs.
+#    - If the script fails midway, the half-built VM is removed.
+#
+#  Supported storage: ZFS, LVM/LVM-thin, Ceph RBD, BTRFS (raw)
+#                     Directory, NFS, CIFS (qcow2)
 # =============================================================================
 
-set -euo pipefail
+set -Eeuo pipefail
 
-# =============================================================================
-# Script location: config files are stored alongside the script
-# =============================================================================
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPT_NAME="$(basename "${BASH_SOURCE[0]}")"
 
 # =============================================================================
-# Defaults: overridden by config file or interactive prompts
+#  DEFAULTS
+#  Edit these to change the starting values. A loaded profile overrides them.
 # =============================================================================
-WORK_DIR="/tmp"
-PROFILE_NAME=""
-PROFILE_PATH=""
 
-# Cloud-init
+# Where images are downloaded and customised.
+# /var/tmp survives reboots, so the cached image is reused next run.
+# Override for one run with:  WORK_DIR=/some/path ./create-ubuntu-cloud-template.sh
+WORK_DIR="${WORK_DIR:-/var/tmp/ubuntu-cloud-template}"
+
+# --- Cloud-init login ---
 CLOUD_USER_DEFAULT="ubuntu"
-CLOUD_PASSWORD_DEFAULT="$(head -c 32 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 16)"
+# 16 random alphanumeric chars. Never saved to a profile.
+_pw="$(head -c 48 /dev/urandom | base64 -w0 | tr -dc 'A-Za-z0-9')"
+CLOUD_PASSWORD_DEFAULT="${_pw:0:16}"
+unset _pw
 
-# Locale / keyboard
+# --- Locale / keyboard (applied on first boot) ---
 LOCAL_LANG="en_GB.UTF-8"
-SET_X11="yes"
+SET_X11="yes"            # "no" skips both locale and keymap
 X11_LAYOUT="gb"
 X11_MODEL="pc105"
 TZ="Europe/London"
 
-# VM hardware
+# --- VM hardware ---
 VMID_DEFAULT="52000"
-CORES="2"
-MEM="2048"
-BALLOON="768"
-BIOS="ovmf"
+SOCKETS="1"              # only asked on multi-NUMA-node hosts; NUMA is on when > 1
+CORES="2"                # per socket
+MEM="2048"               # MB
+BALLOON="768"            # MB, minimum RAM when ballooning. 0 = ballooning off
+BIOS="ovmf"              # UEFI
 MACHINE="q35"
 DISK_SIZE="15G"
-OS_TYPE="l26"
-NET_BRIDGE="vmbr1"
-VLAN=""
+OS_TYPE="l26"            # Linux 2.6+ kernel
+NET_BRIDGE="vmbr0"       # asked each run; must exist on this host
+VLAN=""                  # blank = untagged
 AGENT_ENABLE="1"
-FSTRIM="1"
+FSTRIM="1"               # trim disk after cloning
+
+# Upgrade packages on a clone's first boot? 1 = yes, 0 = no.
+# Same as "Upgrade packages" in the Proxmox Cloud-Init tab (can be changed there per VM).
+CI_UPGRADE="0"
 
 # CPU type
-# - "host": passes the host CPU straight through. Best performance, right
-#   choice for most homelabs where every node is the same CPU generation.
-# - "kvm64": switch to this if you need live migration across nodes with
-#   different CPUs.
+#   host   Best performance. Right for most homelabs (same CPU on every node).
+#   kvm64  Use for live migration between nodes with different CPUs.
 CPU_TYPE="host"
 
-# Storage
-DISK_STOR_DEFAULT="local"
+# --- Storage ---
+DISK_STOR_DEFAULT="local-lvm"
 
-# Packages installed inside the image via virt-customize
-VIRT_PKGS="qemu-guest-agent,cloud-utils,cloud-guest-utils"
+# --- Packages baked into the image ---
+#   qemu-guest-agent   lets Proxmox see the IP, shut down cleanly, trim disks
+#   cloud-init         already in Ubuntu cloud images; listed as a safeguard
+#   cloud-utils,
+#   cloud-guest-utils  growpart, used by cloud-init to grow the root disk
+VIRT_PKGS="qemu-guest-agent,cloud-init,cloud-utils,cloud-guest-utils"
 EXTRA_VIRT_PKGS=""
 
-# SSH public key injected into the template via cloud-init.
-#
-# WARNING: do NOT hardcode your key here as a default.
-# Anyone who clones or copies this script inherits your key, and SSH access
-# to every VM built from it. Leave this blank, the script prompts you at
-# runtime and saves the key in your named .conf profile instead.
+# --- SSH public key ---
+# !! Do NOT hardcode your key here. !!
+# Anyone who copies this script would get SSH access to your VMs.
+# Leave blank. The script asks at runtime and saves it in your .conf profile.
 SSH_KEY=""
 
-# VM tags
+# --- Proxmox tags (semicolon separated) ---
 TAG="template"
 
-# Required host packages
-# - libguestfs-tools: provides virt-customize for image modification
-# - wget:             image/checksum downloads and GitHub key fetching
-# - python3:          used to set VM description without shell newline mangling
-REQUIRED_PKGS=("libguestfs-tools" "wget" "python3")
+# --- Host packages the script needs ---
+#   libguestfs-tools  virt-customize (edits the image offline)
+#   wget              downloads
+REQUIRED_PKGS=("libguestfs-tools" "wget")
 
 # =============================================================================
-# Colour helpers
+#  OUTPUT HELPERS
 # =============================================================================
 RED='\033[0;31m'
 YELLOW='\033[1;33m'
@@ -114,204 +153,261 @@ error()   { echo -e "${RED}[ERROR]${RESET} $*" >&2; }
 die()     { error "$*"; exit 1; }
 header()  { echo -e "\n${BOLD}=== $* ===${RESET}"; }
 
+# Visible countdown so Ctrl+C is always an option.
+# Usage: _countdown "Starting"
+_countdown() {
+    local verb="$1" i
+    for i in 5 4 3 2 1; do
+        printf "\r  %s in %s... " "$verb" "$i"
+        sleep 1
+    done
+    printf "\r  %s now.          \n" "$verb"
+}
+
+# Ask for a number between 1 and max. Re-asks until valid.
+# Usage: _read_index "Prompt" <max> [default]   -> result in $PICK
+_read_index() {
+    local prompt="$1" max="$2" def="${3:-}" ans
+    while true; do
+        read -rp "${prompt}${def:+ [$def]}: " ans
+        ans="${ans:-$def}"
+        # 10# = base 10, so "08" isn't read as (invalid) octal.
+        if [[ "$ans" =~ ^[0-9]+$ ]] && (( 10#$ans >= 1 && 10#$ans <= max )); then
+            PICK=$((10#$ans))
+            return
+        fi
+        warn "Enter a number from 1 to $max."
+    done
+}
+
+# Ask for a whole number in a range. Re-asks until valid.
+# A default outside the range is pulled into it.
+# Usage: _read_number "Prompt" <default> <min> <max>   -> result in $NUM
+_read_number() {
+    local prompt="$1" def="$2" min="$3" max="$4" ans
+    [[ "$def" =~ ^[0-9]+$ ]] || def="$min"
+    (( 10#$def < min )) && def="$min"
+    (( 10#$def > max )) && def="$max"
+    while true; do
+        read -rp "${prompt} [$((10#$def))]: " ans
+        ans="${ans:-$def}"
+        if [[ "$ans" =~ ^[0-9]+$ ]] && (( 10#$ans >= min && 10#$ans <= max )); then
+            NUM=$((10#$ans))
+            return
+        fi
+        warn "Enter a number from $min to $max."
+    done
+}
+
+# Proxmox VM names must be DNS-style: letters, digits, '-' and '.'.
+# (No underscores or spaces.) Checked early, so a bad name can't fail
+# 'qm create' after a long download or after an old template is destroyed.
+_valid_vm_name() {
+    local label='[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?'
+    [[ ${#1} -le 63 && "$1" =~ ^(${label}\.)*${label}$ ]]
+}
+
+# Proxmox tags: letters, digits, '_', '-', '+', '.'. Separated by ';'.
+_valid_tags() {
+    local -a tags
+    local t
+    IFS=';, ' read -ra tags <<< "$1"
+    for t in "${tags[@]}"; do
+        [[ "$t" =~ ^[A-Za-z0-9_][A-Za-z0-9_+.-]*$ ]] || return 1
+    done
+}
+
+# Wrap a value in double quotes, escaped, so it is safe to 'source' back in.
+_conf_val() {
+    local s="$1"
+    s="${s//\\/\\\\}"
+    s="${s//\"/\\\"}"
+    s="${s//\$/\\\$}"
+    s="${s//\`/\\\`}"
+    printf '"%s"' "$s"
+}
+
 # =============================================================================
-# Argument parsing
+#  ARGUMENTS
 # =============================================================================
 CONFIG_FILE=""
-UNATTENDED="no"          # "yes" = skip all prompts when --config is loaded
-VMID_FLAG=""             # set via --vmid to bypass the VMID prompt entirely
-AUTO_VMID="no"           # "yes" = auto-increment VMID on conflict instead of dying
-FORCE_OVERWRITE="no"     # "yes" = destroy existing template VM and replace it
-I_KNOW="no"              # "yes" = skip overwrite countdown in unattended mode
+UNATTENDED="no"          # yes = no prompts (needs --config)
+VMID_FLAG=""             # from --vmid
+AUTO_VMID="no"           # yes = pick next free ID on conflict
+FORCE_OVERWRITE="no"     # yes = replace existing template with same ID
+I_KNOW="no"              # yes = skip overwrite confirmation (unattended)
 
-# CLI flags that must survive config sourcing: stored separately and applied after
+# These CLI values must beat anything in the profile, so hold them aside.
 _CLI_CONVERT_TO_TEMPLATE=""
 _CLI_TEMPL_NAME=""
 
+usage() {
+    cat <<EOF
+Usage: $SCRIPT_NAME [OPTIONS]
+
+PROFILE
+  --config <file>     Load a saved profile (.conf).
+                      Relative paths are looked up next to this script.
+  --name <name>       Set the template name. Skips that prompt.
+
+VM ID
+  --vmid <id>         Use exactly this ID. Stops if it is already taken.
+  --auto-vmid         Find a free ID automatically.
+                        With --vmid:    start at that ID, count upwards.
+                        Without --vmid: start at 100.
+                      Tip: --vmid 52000 --auto-vmid keeps templates together.
+
+TEMPLATE
+  --template          Convert to a Proxmox template at the end.
+  --no-template       Leave it as a normal VM so you can customise it first.
+                      Neither flag: use the profile value, or ask.
+
+AUTOMATION
+  --unattended        No prompts. Requires --config.
+                      The password is generated and shown at the end.
+                      Snippets are only used if SNIPPETS_STOR is in the profile.
+
+DANGER ZONE (deletes data)
+  --force-overwrite   Destroy an existing template with the same ID, then rebuild.
+                      Templates only. Refuses running VMs and normal VMs.
+                      Command line only. Ignored if set in a profile.
+  --i-know-what-i-am-doing
+                      Skip the overwrite confirmation.
+                      Requires --force-overwrite AND --unattended.
+
+  -h, --help          Show this help.
+
+EXAMPLES
+  Interactive first run:
+    ./$SCRIPT_NAME
+
+  Re-run a saved profile:
+    ./$SCRIPT_NAME --config noble-webserver.conf
+
+  Pick the ID yourself:
+    ./$SCRIPT_NAME --config noble-webserver.conf --vmid 52001
+
+  Next free ID from 52000:
+    ./$SCRIPT_NAME --config noble-webserver.conf --vmid 52000 --auto-vmid
+
+  Fully automated (cron-friendly):
+    ./$SCRIPT_NAME --config noble-webserver.conf --unattended \\
+        --vmid 52000 --auto-vmid --template
+
+  Rebuild an existing template in place, no questions:
+    ./$SCRIPT_NAME --config noble-webserver.conf --unattended --vmid 52001 \\
+        --force-overwrite --i-know-what-i-am-doing --template
+EOF
+}
+
+# Fails clearly if a flag that needs a value is missing one.
+_need_arg() {
+    [[ $# -ge 2 && -n "$2" && "$2" != --* ]] || die "$1 needs a value. Use --help for usage."
+}
+
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --config)
-            CONFIG_FILE="$2"
-            shift 2
-            ;;
-        --name)
-            _CLI_TEMPL_NAME="$2"
-            shift 2
-            ;;
-        --vmid)
-            VMID_FLAG="$2"
-            shift 2
-            ;;
-        --auto-vmid)
-            AUTO_VMID="yes"
-            shift
-            ;;
-        --unattended)
-            UNATTENDED="yes"
-            shift
-            ;;
-        --force-overwrite)
-            FORCE_OVERWRITE="yes"
-            shift
-            ;;
-        --i-know-what-i-am-doing)
-            I_KNOW="yes"
-            shift
-            ;;
-        --template)
-            _CLI_CONVERT_TO_TEMPLATE="yes"
-            shift
-            ;;
-        --no-template)
-            _CLI_CONVERT_TO_TEMPLATE="no"
-            shift
-            ;;
-        --help|-h)
-            echo "Usage: $SCRIPT_NAME [OPTIONS]"
-            echo ""
-            echo "Options:"
-            echo "  --config <file>              Load a previously saved profile config file."
-            echo "                               Paths are relative to the script directory unless absolute."
-            echo "  --name <name>                Set the VM template name directly, skipping the prompt."
-            echo "  --vmid <id>                  Set the VM ID directly, skipping the prompt."
-            echo "                               Fails if the ID is already taken (use --auto-vmid"
-            echo "                               to increment automatically instead)."
-            echo "  --auto-vmid                  Automatically find the next free VM ID."
-            echo "                               Without --vmid: starts from 100 upwards."
-            echo "                               With --vmid <id>: tries <id> first, then"
-            echo "                               increments from there if taken."
-            echo "                               Recommended: always pair with --vmid to control"
-            echo "                               which ID range your templates live in."
-            echo "                               e.g. --vmid 52000 --auto-vmid keeps templates"
-            echo "                               in the 52000+ range rather than starting at 100."
-            echo "  --unattended                 Skip all interactive prompts. Requires --config."
-            echo "                               Password is auto-generated and shown at the end."
-            echo "                               Snippet search is skipped unless SNIPPETS_STOR is"
-            echo "                               already set in the config file."
-            echo "  --force-overwrite            Destroy an existing Proxmox template with the same"
-            echo "                               VM ID and replace it. CLI-only flag: cannot be set"
-            echo "                               in a config file. Only works on templates (template: 1);"
-            echo "                               refuses to destroy running or non-template VMs."
-            echo "  --i-know-what-i-am-doing     Skip the overwrite countdown/confirmation when"
-            echo "                               combined with --force-overwrite and --unattended."
-            echo "                               Requires both flags to be present."
-            echo "  --template                   Automatically convert the VM to a Proxmox template at the end."
-            echo "  --no-template                Leave the VM as a regular VM (for further customisation)."
-            echo "                               If neither flag is given, you will be asked interactively"
-            echo "                               (or the value from the config file will be used)."
-            echo ""
-            echo "Examples:"
-            echo "  ./$SCRIPT_NAME"
-            echo "  ./$SCRIPT_NAME --config noble-webserver.conf"
-            echo "  ./$SCRIPT_NAME --config noble-webserver.conf --name ubuntu-noble-webserver"
-            echo "  ./$SCRIPT_NAME --config noble-webserver.conf --vmid 52001"
-            echo "  ./$SCRIPT_NAME --config noble-webserver.conf --auto-vmid"
-            echo "    (next free ID from 100)"
-            echo "  ./$SCRIPT_NAME --config noble-webserver.conf --vmid 52000 --auto-vmid"
-            echo "    (next free ID from 52000: keeps templates in your chosen range)"
-            echo "  ./$SCRIPT_NAME --config noble-webserver.conf --vmid 52001 --force-overwrite"
-            echo "  ./$SCRIPT_NAME --config noble-webserver.conf --unattended --vmid 52000 --auto-vmid --template"
-            echo "  ./$SCRIPT_NAME --config noble-webserver.conf --unattended --vmid 52001 --name ubuntu-noble-webserver --force-overwrite --i-know-what-i-am-doing --template"
-            exit 0
-            ;;
-        *)
-            die "Unknown argument: $1. Use --help for usage."
-            ;;
+        --config)        _need_arg "$@"; CONFIG_FILE="$2"; shift 2 ;;
+        --name)          _need_arg "$@"; _CLI_TEMPL_NAME="$2"; shift 2 ;;
+        --vmid)          _need_arg "$@"; VMID_FLAG="$2"; shift 2 ;;
+        --auto-vmid)     AUTO_VMID="yes"; shift ;;
+        --unattended)    UNATTENDED="yes"; shift ;;
+        --force-overwrite) FORCE_OVERWRITE="yes"; shift ;;
+        --i-know-what-i-am-doing) I_KNOW="yes"; shift ;;
+        --template)      _CLI_CONVERT_TO_TEMPLATE="yes"; shift ;;
+        --no-template)   _CLI_CONVERT_TO_TEMPLATE="no"; shift ;;
+        -h|--help)       usage; exit 0 ;;
+        *)               die "Unknown argument: $1. Use --help for usage." ;;
     esac
 done
 
-# Resolve config file path relative to script dir if not absolute
-if [[ -n "$CONFIG_FILE" && "$CONFIG_FILE" != /* ]]; then
-    CONFIG_FILE="$SCRIPT_DIR/$CONFIG_FILE"
-fi
+[[ $EUID -eq 0 ]] || die "Run this script as root."
 
-# Load config file if provided
+# --- Load the profile ---
 if [[ -n "$CONFIG_FILE" ]]; then
-    if [[ ! -f "$CONFIG_FILE" ]]; then
-        die "Config file not found: $CONFIG_FILE"
-    fi
+    [[ "$CONFIG_FILE" != /* ]] && CONFIG_FILE="$SCRIPT_DIR/$CONFIG_FILE"
+    [[ -f "$CONFIG_FILE" ]] || die "Config file not found: $CONFIG_FILE"
     info "Loading config from: $CONFIG_FILE"
+
+    # Safety flags are CLI-only. Snapshot them so a profile can't change them.
+    _safe_flags="$UNATTENDED|$AUTO_VMID|$FORCE_OVERWRITE|$I_KNOW|$VMID_FLAG|$CONFIG_FILE"
     # shellcheck source=/dev/null
     source "$CONFIG_FILE"
+    IFS='|' read -r UNATTENDED AUTO_VMID FORCE_OVERWRITE I_KNOW VMID_FLAG CONFIG_FILE <<< "$_safe_flags"
+    unset _safe_flags
 fi
 
-# --unattended requires --config
-if [[ "$UNATTENDED" == "yes" && -z "$CONFIG_FILE" ]]; then
-    die "--unattended requires --config <file>. There are no saved values to run from."
-fi
+# --- Flag sanity checks ---
+[[ "$UNATTENDED" == "yes" && -z "$CONFIG_FILE" ]] \
+    && die "--unattended requires --config <file>. There are no saved values to run from."
 
-# --i-know-what-i-am-doing only makes sense alongside both --force-overwrite and --unattended
-if [[ "$I_KNOW" == "yes" && ( "$FORCE_OVERWRITE" != "yes" || "$UNATTENDED" != "yes" ) ]]; then
-    die "--i-know-what-i-am-doing requires both --force-overwrite and --unattended."
-fi
+[[ "$I_KNOW" == "yes" && ( "$FORCE_OVERWRITE" != "yes" || "$UNATTENDED" != "yes" ) ]] \
+    && die "--i-know-what-i-am-doing requires both --force-overwrite and --unattended."
 
-# --auto-vmid and --force-overwrite are mutually exclusive
-if [[ "$AUTO_VMID" == "yes" && "$FORCE_OVERWRITE" == "yes" ]]; then
-    die "--auto-vmid and --force-overwrite are mutually exclusive. Choose one conflict resolution strategy."
-fi
+[[ "$AUTO_VMID" == "yes" && "$FORCE_OVERWRITE" == "yes" ]] \
+    && die "--auto-vmid and --force-overwrite are mutually exclusive. Choose one."
 
-# Apply CLI flag overrides: these must win over anything in the config file
+[[ -n "$VMID_FLAG" && ! "$VMID_FLAG" =~ ^[1-9][0-9]{2,8}$ ]] \
+    && die "--vmid must be a number from 100 to 999999999."
+
+[[ -n "$_CLI_TEMPL_NAME" ]] && ! _valid_vm_name "$_CLI_TEMPL_NAME" \
+    && die "Invalid --name '$_CLI_TEMPL_NAME'. Use letters, digits, '-' and '.' only."
+
+# CLI beats profile.
 CONVERT_TO_TEMPLATE="${_CLI_CONVERT_TO_TEMPLATE:-${CONVERT_TO_TEMPLATE:-}}"
 [[ -n "$_CLI_TEMPL_NAME" ]] && TEMPL_NAME="$_CLI_TEMPL_NAME"
 [[ -n "$VMID_FLAG"       ]] && VMID="$VMID_FLAG"
 
 # =============================================================================
-# Traps: CTRL+C and unexpected errors
+#  FAILURE HANDLING
+#  On any failure or Ctrl+C: remove the half-built VM and temp files.
+#  The cached pristine image is kept so a retry is fast.
 # =============================================================================
-# VMID_CREATED tracks whether qm create has run so the error handler knows
-# whether there is a VM to clean up.
-VMID_CREATED=""
+VMID_CREATED=""          # set once 'qm create' succeeds
+WORK_STARTED="no"        # set once files are written to WORK_DIR
+LAST_ERR_LINE=""
+TEMPLATE_CONVERTED="no"
+PASSWORD_GENERATED="no"
 
-error_handler() {
-    local exit_code=$?
-    local line=$1
-    echo ""
-    error "Script failed at line $line (exit code $exit_code)."
-    _destroy_partial_vm
-    cleanup
-    exit "$exit_code"
-}
+on_exit() {
+    local rc=$?
+    trap - EXIT ERR INT TERM
+    (( rc == 0 )) && return 0
 
-ctrl_c() {
-    echo ""
-    warn "Interrupted by user."
+    [[ -n "$LAST_ERR_LINE" ]] && error "Command failed at line $LAST_ERR_LINE (exit code $rc)."
     _destroy_partial_vm
-    cleanup
-    exit 1
+    [[ "$WORK_STARTED" == "yes" ]] && cleanup failed
+    exit "$rc"
 }
 
 _destroy_partial_vm() {
-    if [[ -n "${VMID_CREATED:-}" ]] && qm list | awk 'NR>1 {print $1}' | grep -q "^${VMID_CREATED}$"; then
-        warn "Destroying partially configured VM ${VMID_CREATED}..."
-        qm destroy "$VMID_CREATED" --destroy-unreferenced-disks 1 --purge 1 2>/dev/null || true
-        warn "VM ${VMID_CREATED} destroyed."
-    fi
+    [[ -n "$VMID_CREATED" ]] || return 0
+    vmid_exists "$VMID_CREATED" || return 0
+    warn "Removing partially built VM ${VMID_CREATED}..."
+    qm destroy "$VMID_CREATED" --destroy-unreferenced-disks 1 --purge 1 &>/dev/null || true
+    warn "VM ${VMID_CREATED} removed."
 }
 
-trap ctrl_c INT
-trap 'error_handler $LINENO' ERR
+trap 'LAST_ERR_LINE=$LINENO' ERR
+trap on_exit EXIT
+trap 'echo; warn "Interrupted."; exit 130' INT TERM
 
 # =============================================================================
-# Preflight: must be on a Proxmox host
+#  PREFLIGHT
 # =============================================================================
 proxmox_check() {
     header "System Check"
-    if ! pveversion &>/dev/null; then
-        die "This script must be run on a Proxmox VE host."
-    fi
-    success "Proxmox VE detected."
+    command -v pveversion &>/dev/null && pveversion &>/dev/null \
+        || die "This script must be run on a Proxmox VE host."
+    success "Proxmox VE detected: $(pveversion | cut -d/ -f2)"
 }
 
-# =============================================================================
-# Preflight: required packages
-# =============================================================================
 install_packages() {
     header "Package Check"
-    local missing=()
+    local missing=() pkg
     for pkg in "${REQUIRED_PKGS[@]}"; do
-        if ! dpkg -l "$pkg" 2>/dev/null | grep -q "^ii"; then
-            missing+=("$pkg")
-        fi
+        dpkg-query -W -f='${Status}' "$pkg" 2>/dev/null | grep -q "ok installed" \
+            || missing+=("$pkg")
     done
 
     if [[ ${#missing[@]} -eq 0 ]]; then
@@ -324,8 +420,7 @@ install_packages() {
         info "Unattended mode: installing automatically."
     else
         read -rp "Install them now? (Y/n): " choice
-        choice="${choice:-Y}"
-        [[ ! "$choice" =~ ^[Yy]$ ]] && die "Required packages not installed. Aborting."
+        [[ "${choice:-Y}" =~ ^[Yy]$ ]] || die "Required packages not installed. Aborting."
     fi
     apt-get update -qq
     apt-get install -y "${missing[@]}"
@@ -333,13 +428,61 @@ install_packages() {
 }
 
 # =============================================================================
-# Ubuntu version selection: fetched dynamically from cloud-images.ubuntu.com
+#  UBUNTU VERSION
+#  The list is read live from cloud-images.ubuntu.com, so new releases
+#  appear without editing this script.
 # =============================================================================
+# Codename -> version number and support status, e.g.
+#   RELEASE_VER[noble]="24.04 LTS"   RELEASE_STATUS[noble]=""
+#   RELEASE_VER[focal]="20.04 LTS"   RELEASE_STATUS[focal]="end of life"
+# Read from Ubuntu's release lists (the same ones do-release-upgrade uses).
+# Optional: if they can't be fetched, only codenames are shown.
+declare -A RELEASE_VER=() RELEASE_STATUS=()
+
+_load_release_info() {
+    local dist ver status
+    while IFS='|' read -r dist ver status; do
+        [[ -n "$dist" && -n "$ver" ]] || continue
+        RELEASE_VER["$dist"]="$ver"
+        RELEASE_STATUS["$dist"]="$status"
+    done < <(
+        {
+            # One quick try each: this is only for labels, never worth a long wait.
+            wget -qO- --timeout=10 --tries=1 "https://changelogs.ubuntu.com/meta-release" || true
+            echo "Source: development"
+            wget -qO- --timeout=10 --tries=1 "https://changelogs.ubuntu.com/meta-release-development" || true
+        } | awk -v now="$(date +%Y%m)" '
+            # Records are blank-line separated. First entry per codename wins,
+            # and the released list is read before the development one.
+            function flush() {
+                if (dist != "" && ver != "" && !(dist in seen)) {
+                    split(ver, p, ".")                  # 24.04.5 -> 24.04
+                    status = dev ? "in development" : (sup == "0" ? "end of life" : "")
+                    # Ubuntu lists old LTS releases as supported because of paid
+                    # ESM. Free support lasts 5 years, to the end of May.
+                    if (status == "" && lts && now > (2000 + p[1] + 5) * 100 + 5)
+                        status = "Ubuntu Pro only"
+                    print dist "|" p[1] "." p[2] (lts ? " LTS" : "") "|" status
+                    seen[dist] = 1
+                }
+                dist = ""; ver = ""; sup = ""; lts = 0
+            }
+            /^Source: development/ { flush(); dev = 1; next }
+            /^Dist: /      { dist = $2 }
+            /^Version: /   { ver = $2; lts = ($3 == "LTS") }
+            /^Supported: / { sup = $2 }
+            /^[[:space:]]*$/ { flush() }
+            END { flush() }'
+    )
+}
+
 select_ubuntu_version() {
     header "Ubuntu Version Selection"
 
-    # If already set via config, skip interactive selection
+    _load_release_info
+
     if [[ -n "${DISTRO_VER:-}" ]]; then
+        [[ "$DISTRO_VER" =~ ^[a-z]+$ ]] || die "Invalid DISTRO_VER in config: '$DISTRO_VER'"
         info "Using distro from config: $DISTRO_VER"
         _set_distro_vars "$DISTRO_VER"
         return
@@ -347,46 +490,47 @@ select_ubuntu_version() {
 
     info "Fetching available Ubuntu Cloud Image versions..."
 
-    # Scrape directory listing for codename directories that have a current/ image
-    local available_versions=()
-    available_versions=$(
+    # Every codename folder is checked for a current amd64 image.
+    # Checks run 8 at a time; doing them one by one is slow.
+    local codenames=()
+    mapfile -t codenames < <(
         wget -qO- "https://cloud-images.ubuntu.com/" \
         | grep -oP 'href="\K[a-z]+(?=/")' \
-        | while read -r codename; do
-            local url="https://cloud-images.ubuntu.com/${codename}/current/${codename}-server-cloudimg-amd64.img"
-            if wget -q --spider "$url" 2>/dev/null; then
-                echo "$codename"
-            fi
-        done
+        | sort -u \
+        | xargs -r -P 8 -n 1 sh -c \
+            'wget -q --spider "https://cloud-images.ubuntu.com/$1/current/$1-server-cloudimg-amd64.img" && echo "$1"' _
+    ) || true
+
+    [[ ${#codenames[@]} -gt 0 ]] \
+        || die "Could not fetch Ubuntu versions from cloud-images.ubuntu.com. Check your internet connection."
+
+    # Oldest to newest by version number. Unknown versions go last.
+    local version_list=() c
+    mapfile -t version_list < <(
+        for c in "${codenames[@]}"; do
+            printf '%s %s\n' "${RELEASE_VER[$c]:-99.99}" "$c"
+        done | sort -V | awk '{print $NF}'
     )
-
-    if [[ -z "$available_versions" ]]; then
-        die "Could not fetch Ubuntu versions from cloud-images.ubuntu.com. Check your internet connection."
-    fi
-
-    mapfile -t version_list <<< "$available_versions"
 
     echo ""
     echo "Available Ubuntu versions:"
-    local i=1
-    for v in "${version_list[@]}"; do
-        echo "  $i) $v"
-        ((i++))
+    local i note
+    for i in "${!version_list[@]}"; do
+        c="${version_list[$i]}"
+        note="${RELEASE_STATUS[$c]:-}"
+        printf "  %d) %-10s %-10s %s\n" "$((i + 1))" "$c" "${RELEASE_VER[$c]:-}" "${note:+($note)}"
     done
     echo ""
 
-    local selected=""
+    # Accepts a number or a codename.
+    local selected="" choice v
     while [[ -z "$selected" ]]; do
         read -rp "Select a version (number or codename): " choice
-        # Allow numeric or direct codename entry
-        if [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#version_list[@]} )); then
-            selected="${version_list[$((choice-1))]}"
+        if [[ "$choice" =~ ^[0-9]+$ ]] && (( 10#$choice >= 1 && 10#$choice <= ${#version_list[@]} )); then
+            selected="${version_list[$((10#$choice - 1))]}"
         else
             for v in "${version_list[@]}"; do
-                if [[ "$v" == "$choice" ]]; then
-                    selected="$v"
-                    break
-                fi
+                [[ "$v" == "$choice" ]] && selected="$v" && break
             done
         fi
         [[ -z "$selected" ]] && warn "Invalid selection. Try again."
@@ -396,187 +540,217 @@ select_ubuntu_version() {
 }
 
 _set_distro_vars() {
-    local codename="$1"
-    DISTRO_VER="$codename"
+    DISTRO_VER="$1"
     DISK_IMAGE="${DISTRO_VER}-server-cloudimg-amd64.img"
     IMAGE_URL="https://cloud-images.ubuntu.com/${DISTRO_VER}/current/${DISK_IMAGE}"
     CHECKSUM_URL="https://cloud-images.ubuntu.com/${DISTRO_VER}/current/SHA256SUMS"
-    TEMPL_NAME_DEFAULT="ubuntu-${DISTRO_VER}-cloud-template"
-    OS_NAME="Ubuntu $(echo "$DISTRO_VER" | awk '{print toupper(substr($0,1,1)) tolower(substr($0,2))}')"
+    # Keep a template name loaded from a profile.
+    TEMPL_NAME_DEFAULT="${TEMPL_NAME_DEFAULT:-ubuntu-${DISTRO_VER}-cloud-template}"
+    # e.g. "Ubuntu 24.04 LTS (Noble)", or "Ubuntu Noble" if the version is unknown.
+    local ver="${RELEASE_VER[$DISTRO_VER]:-}"
+    OS_NAME="Ubuntu ${ver:+$ver (}${DISTRO_VER^}${ver:+)}"
     success "Selected: $OS_NAME"
+    [[ "${RELEASE_STATUS[$DISTRO_VER]:-}" == "end of life" ]] \
+        && warn "$OS_NAME is end of life and no longer gets security updates."
+    [[ "${RELEASE_STATUS[$DISTRO_VER]:-}" == "Ubuntu Pro only" ]] \
+        && warn "$OS_NAME only gets security updates with an Ubuntu Pro subscription."
+    [[ "${RELEASE_STATUS[$DISTRO_VER]:-}" == "in development" ]] \
+        && warn "$OS_NAME is a development release. Expect breakage."
+    return 0
 }
 
-# Maps a pvesm storage type string to STORAGE_FORMAT and STORAGE_BACKEND globals
+# =============================================================================
+#  STORAGE
+#  Only storages that can hold VM disks ('images' content) are offered.
+#  The disk format is picked from the storage type:
+#    Block storage (ZFS, LVM, Ceph, BTRFS) -> raw
+#    File storage (dir, NFS, CIFS)          -> qcow2
+#  Disk cache:
+#    ZFS        -> none. ZFS has its own cache (ARC); a host cache on top
+#                  would double-buffer.
+#    Everything else -> writethrough.
+# =============================================================================
 _resolve_storage_type() {
-    local stor_type="$1"
-    case "$stor_type" in
-        zfspool)          STORAGE_FORMAT="raw";   STORAGE_BACKEND="zfs" ;;
-        lvmthin|lvm)      STORAGE_FORMAT="raw";   STORAGE_BACKEND="lvm" ;;
-        dir|nfs|cifs|btrfs) STORAGE_FORMAT="qcow2"; STORAGE_BACKEND="dir" ;;
+    STORAGE_TYPE="$1"
+    case "$STORAGE_TYPE" in
+        zfspool|zfs) DISK_CACHE="none" ;;
+        *)           DISK_CACHE="writethrough" ;;
+    esac
+    case "$STORAGE_TYPE" in
+        zfspool|zfs|lvmthin|lvm|rbd|btrfs)
+            STORAGE_FORMAT="raw" ;;
+        dir|nfs|cifs|glusterfs)
+            STORAGE_FORMAT="qcow2" ;;
         *)
-            warn "Unknown storage type '$stor_type'. Defaulting to qcow2."
-            STORAGE_FORMAT="qcow2"; STORAGE_BACKEND="dir" ;;
+            warn "Unknown storage type '$STORAGE_TYPE'. Letting Proxmox choose the format."
+            STORAGE_FORMAT="" ;;
     esac
 }
 
-# =============================================================================
-# Storage: list available Proxmox storages, let user pick, auto-detect type
-# =============================================================================
+# Lists active storages that accept VM disks as "name type" lines.
+# Plain iSCSI is left out: it only exposes existing LUNs and cannot create
+# new disks. (Put LVM on top of the iSCSI LUN to use it here.)
+_image_storages() {
+    pvesm status --content images 2>/dev/null \
+        | awk 'NR>1 && $3=="active" && $2!="iscsi" && $2!="iscsidirect" {print $1, $2}'
+}
+
 select_storage() {
     header "Storage Selection"
     echo "  This is where your VM template will be stored on Proxmox."
     echo ""
 
-    if [[ -n "${DISK_STOR:-}" ]]; then
-        info "Using storage from config: $DISK_STOR"
-        local stored_type
-        stored_type=$(pvesm status | awk -v s="$DISK_STOR" '$1==s {print $2}')
-        if [[ -z "$stored_type" ]]; then
-            warn "Configured storage '$DISK_STOR' not found or inactive: falling back to selection."
-            DISK_STOR=""
-        else
-            _resolve_storage_type "$stored_type"
-            success "Template will be stored on: $DISK_STOR ($stored_type / $STORAGE_FORMAT)"
-            return
-        fi
-    fi
-
-    info "Scanning active Proxmox storage pools..."
-    echo ""
-
+    local name type
     local storages=() types=()
-    while IFS= read -r line; do
-        local name type status
-        name=$(awk '{print $1}' <<< "$line")
-        type=$(awk '{print $2}' <<< "$line")
-        status=$(awk '{print $3}' <<< "$line")
-        [[ "$name" == "Name" || "$status" != "active" ]] && continue
+    while read -r name type; do
         storages+=("$name")
         types+=("$type")
-    done < <(pvesm status)
+    done < <(_image_storages)
 
-    [[ ${#storages[@]} -eq 0 ]] && die "No active storage pools found."
+    [[ ${#storages[@]} -gt 0 ]] || die "No active storage pools that accept VM disks were found."
 
-    local i=1
+    # Profile value: use it if it is still valid.
+    if [[ -n "${DISK_STOR:-}" ]]; then
+        local idx
+        for idx in "${!storages[@]}"; do
+            if [[ "${storages[$idx]}" == "$DISK_STOR" ]]; then
+                _resolve_storage_type "${types[$idx]}"
+                success "Using storage from config: $DISK_STOR ($STORAGE_TYPE / ${STORAGE_FORMAT:-auto})"
+                return
+            fi
+        done
+        [[ "$UNATTENDED" == "yes" ]] \
+            && die "Configured storage '$DISK_STOR' is missing, inactive or cannot hold VM disks."
+        warn "Configured storage '$DISK_STOR' is missing, inactive or cannot hold VM disks."
+        warn "Choose another below."
+    fi
+
+    local default_num=1 idx
     for idx in "${!storages[@]}"; do
-        printf "  %d) %-20s %s\n" "$i" "${storages[$idx]}" "${types[$idx]}"
-        ((i++))
+        printf "  %d) %-20s %s\n" "$((idx + 1))" "${storages[$idx]}" "${types[$idx]}"
+        [[ "${storages[$idx]}" == "$DISK_STOR_DEFAULT" ]] && default_num=$((idx + 1))
     done
     echo ""
 
-    local default_num=1
-    for idx in "${!storages[@]}"; do
-        if [[ "${storages[$idx]}" == "$DISK_STOR_DEFAULT" ]]; then
-            default_num=$((idx + 1))
-            break
-        fi
-    done
-
-    local selected_stor="" selected_type=""
-    while [[ -z "$selected_stor" ]]; do
-        read -rp "Select storage pool [${default_num}]: " choice
-        choice="${choice:-$default_num}"
-        if [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#storages[@]} )); then
-            selected_stor="${storages[$((choice-1))]}"
-            selected_type="${types[$((choice-1))]}"
-        else
-            warn "Invalid selection. Enter a number between 1 and ${#storages[@]}."
-        fi
-    done
-
-    DISK_STOR="$selected_stor"
-    _resolve_storage_type "$selected_type"
-    success "Template will be stored on: $DISK_STOR ($selected_type / $STORAGE_FORMAT)"
+    _read_index "Select storage pool" "${#storages[@]}" "$default_num"
+    DISK_STOR="${storages[$((PICK - 1))]}"
+    _resolve_storage_type "${types[$((PICK - 1))]}"
+    success "Template will be stored on: $DISK_STOR ($STORAGE_TYPE / ${STORAGE_FORMAT:-auto})"
 }
 
 # =============================================================================
-# VM ID helpers
+#  VM ID HELPERS
+#  /etc/pve/.vmlist covers the whole cluster, VMs AND containers.
+#  ('qm list' only shows VMs on this node, so it misses clashes.)
 # =============================================================================
 vmid_exists() {
-    qm list | awk 'NR>1 {print $1}' | grep -q "^${1}$"
+    if [[ -r /etc/pve/.vmlist ]]; then
+        grep -q "\"${1}\":" /etc/pve/.vmlist
+    else
+        qm status "$1" &>/dev/null
+    fi
 }
 
-# Returns 0 (true) if the VMID exists AND has template:1 in its config
+# Config path for a VM on THIS node. Overwrite only works on local VMs.
+_local_vm_conf() { echo "/etc/pve/qemu-server/${1}.conf"; }
+
+# True if the VM is a template. Reads only the main section, not snapshots.
 vmid_is_template() {
-    local id="$1"
-    grep -q "^template:" /etc/pve/nodes/*/qemu-server/${id}.conf 2>/dev/null
+    local conf
+    conf="$(_local_vm_conf "$1")"
+    [[ -f "$conf" ]] && sed '/^\[/q' "$conf" | grep -q '^template: 1'
 }
 
-# Returns 0 (true) if the VMID exists AND the VM is currently running
 vmid_is_running() {
-    local id="$1"
-    qm status "$id" 2>/dev/null | grep -q "^status: running"
+    qm status "$1" 2>/dev/null | grep -q "^status: running"
 }
 
-# Pull the VM name from Proxmox config for display in warnings
+# VM name, for warnings. Looks across all cluster nodes.
 vmid_name() {
-    local id="$1"
-    grep "^name:" /etc/pve/nodes/*/qemu-server/${id}.conf 2>/dev/null \
-        | head -1 | awk '{print $2}'
+    sed -n 's/^name: //p' /etc/pve/nodes/*/qemu-server/"${1}".conf 2>/dev/null | head -1
 }
 
-# Find the next free VMID at or above a given starting point
 next_free_vmid() {
     local id="$1"
     while vmid_exists "$id"; do
-        ((id++))
+        id=$((id + 1))
     done
     echo "$id"
 }
 
-# Destroy an existing template VM: called only when --force-overwrite is set
-# and all safety checks have passed.
-destroy_existing_template() {
+# --force-overwrite is split in two steps, so the old template survives
+# if you cancel at the summary or the download/customise step fails:
+#   1. _check_overwrite     early: safety checks + your confirmation
+#   2. replace_old_template late:  re-check, countdown, destroy
+OVERWRITE_VMID=""
+
+# Dies unless the VM is a stopped template on this node.
+_assert_overwritable() {
     local id="$1"
-    local name
+    [[ -f "$(_local_vm_conf "$id")" ]] \
+        || die "ID $id belongs to a container or a VM on another node. --force-overwrite only replaces VM templates on this node."
+    vmid_is_running "$id" \
+        && die "VM $id is running. Stop it before overwriting."
+    vmid_is_template "$id" \
+        || die "VM $id ('$(vmid_name "$id")') is not a template. --force-overwrite only replaces templates, to protect normal VMs."
+    return 0
+}
+
+_check_overwrite() {
+    local id="$1" name
+    _assert_overwritable "$id"
     name="$(vmid_name "$id")"
 
     echo ""
     warn "OVERWRITE REQUESTED"
-    warn "This will permanently destroy VM $id ('${name}') and all its disks."
-    warn "This action cannot be undone."
+    warn "VM $id ('${name}') and all its disks will be destroyed and rebuilt."
+    warn "This happens after the new image is ready. It cannot be undone."
     echo ""
 
-    if [[ "$UNATTENDED" == "yes" && "$I_KNOW" == "yes" ]]; then
-        warn "Unattended overwrite confirmed via --i-know-what-i-am-doing. Destroying in 5 seconds..."
-        for i in 5 4 3 2 1; do
-            printf "\r  Destroying in %s... " "$i"
-            sleep 1
-        done
-        printf "\r  Destroying now.          \n"
-    elif [[ "$UNATTENDED" == "yes" ]]; then
-        # Should never reach here due to earlier validation, but be safe
-        die "Unattended overwrite requires --i-know-what-i-am-doing."
+    if [[ "$UNATTENDED" == "yes" ]]; then
+        # Earlier checks guarantee I_KNOW=yes here; re-check anyway.
+        [[ "$I_KNOW" == "yes" ]] || die "Unattended overwrite requires --i-know-what-i-am-doing."
+        info "Confirmed via --i-know-what-i-am-doing."
     else
+        # Unnamed VMs are confirmed by ID, so an empty Enter can never match.
+        local expected="${name:-$id}" what="name"
+        [[ -z "$name" ]] && what="ID"
         echo "  VM ID:   $id"
-        echo "  VM name: ${name}"
+        echo "  VM name: ${name:-(none)}"
         echo ""
-        read -rp "  Type the VM name to confirm destruction: " confirm
-        if [[ "$confirm" != "$name" ]]; then
-            die "Name did not match. Aborting overwrite."
-        fi
-        warn "Destroying VM $id in 5 seconds: press Ctrl+C to abort."
-        for i in 5 4 3 2 1; do
-            printf "\r  Destroying in %s... " "$i"
-            sleep 1
-        done
-        printf "\r  Destroying now.          \n"
+        read -rp "  Type the VM ${what} to confirm destruction: " confirm
+        [[ "$confirm" == "$expected" ]] || die "The ${what} did not match. Aborting overwrite."
     fi
+    OVERWRITE_VMID="$id"
+}
 
-    echo ""
-    qm destroy "$id" --destroy-unreferenced-disks 1 --purge 1
-    success "VM $id destroyed."
+# Runs just before create_vm. The VM may have changed in the meantime,
+# so every safety check runs again.
+replace_old_template() {
+    [[ -n "$OVERWRITE_VMID" ]] || return 0
+    header "Replace Existing Template"
+
+    if ! vmid_exists "$OVERWRITE_VMID"; then
+        info "VM $OVERWRITE_VMID no longer exists. Nothing to destroy."
+        return
+    fi
+    _assert_overwritable "$OVERWRITE_VMID"
+
+    warn "Destroying VM $OVERWRITE_VMID. Press Ctrl+C to abort."
+    _countdown "Destroying"
+    qm destroy "$OVERWRITE_VMID" --destroy-unreferenced-disks 1 --purge 1
+    success "VM $OVERWRITE_VMID destroyed."
 }
 
 get_valid_vmid() {
-    # --auto-vmid with no explicit --vmid: always find next free from 100
+    # --auto-vmid alone: next free from 100.
     if [[ "$AUTO_VMID" == "yes" && -z "$VMID_FLAG" ]]; then
-        VMID="$(next_free_vmid "100")"
-        info "Auto-selected next free VM ID: $VMID"
+        VMID="$(next_free_vmid 100)"
+        success "Auto-selected next free VM ID: $VMID"
         return
     fi
 
-    # Set VMID from flag, config default, or interactive prompt
+    # From --vmid, else the default, else ask.
     if [[ -z "${VMID:-}" ]]; then
         if [[ "$UNATTENDED" == "yes" ]]; then
             VMID="$VMID_DEFAULT"
@@ -586,94 +760,115 @@ get_valid_vmid() {
         fi
     fi
 
-    # Handle conflict
-    if vmid_exists "$VMID"; then
-
-        # --force-overwrite path
-        if [[ "$FORCE_OVERWRITE" == "yes" ]]; then
-            if vmid_is_running "$VMID"; then
-                die "VM $VMID is currently running. Stop it before overwriting."
-            fi
-            if ! vmid_is_template "$VMID"; then
-                local name
-                name="$(vmid_name "$VMID")"
-                die "VM $VMID ('${name}') is not a Proxmox template (template: 1 not set). --force-overwrite only works on templates to prevent accidental destruction of regular VMs."
-            fi
-            destroy_existing_template "$VMID"
-            return
-        fi
-
-        # --auto-vmid with explicit --vmid: increment from the requested ID
-        if [[ "$AUTO_VMID" == "yes" ]]; then
-            local original_vmid="$VMID"
+    # Interactive: keep asking until the ID is valid and free.
+    # (Unattended conflicts are handled below and never loop.)
+    while true; do
+        if [[ ! "$VMID" =~ ^[1-9][0-9]{2,8}$ ]]; then
+            [[ "$UNATTENDED" == "yes" ]] && die "Invalid VM ID: '$VMID'."
+            warn "VM ID must be a number from 100 to 999999999."
+        elif ! vmid_exists "$VMID"; then
+            break
+        elif [[ "$FORCE_OVERWRITE" == "yes" ]]; then
+            # Confirm now; the actual destroy waits until the image is ready.
+            _check_overwrite "$VMID"
+            break
+        elif [[ "$AUTO_VMID" == "yes" ]]; then
+            local original="$VMID"
             VMID="$(next_free_vmid "$VMID")"
-            warn "VM ID $original_vmid already exists. Next free ID from there: $VMID"
-            return
-        fi
-
-        # Unattended with no resolution strategy: die clearly
-        if [[ "$UNATTENDED" == "yes" ]]; then
+            warn "VM ID $original is taken. Using the next free ID: $VMID"
+            break
+        elif [[ "$UNATTENDED" == "yes" ]]; then
             die "VM ID $VMID already exists. Re-run with one of:
-  --vmid <id>          to specify a different ID
-  --auto-vmid          to automatically use the next free ID
-  --force-overwrite    to destroy the existing template and replace it (templates only)"
-        fi
-
-        # Interactive: keep prompting
-        while vmid_exists "$VMID"; do
+  --vmid <id>          a different ID
+  --auto-vmid          the next free ID
+  --force-overwrite    replace the existing template (templates only)"
+        else
             warn "VM ID $VMID already exists."
-            read -rp "Enter a different VM ID: " VMID
-        done
-    fi
+        fi
+        read -rp "Enter a different VM ID: " VMID
+    done
 
     success "VM ID: $VMID"
 }
 
 # =============================================================================
-# SSH key selection helper
-# =============================================================================
-# Five ways to provide a key:
-#   1. Paste a public key directly
-#   2. Give a path to a .pub file
-#   3. Pick from keys found in ~/.ssh/ on this Proxmox host
-#   4. Fetch from GitHub by username
-#   5. Skip (no SSH key)
-# If a key was already loaded from a config file, the user can keep it,
-# replace it, or clear it instead.
+#  SSH KEY
+#  Ways to provide a key:
+#    1. Paste it   2. Path to a .pub file   3. Pick from ~/.ssh/
+#    4. Fetch from GitHub by username       5. Skip
+#  Multiple keys (one per line) are supported.
 #
-# Note: GitHub strips comments server-side. Keys fetched from
-# github.com/<user>.keys arrive with no comment field, no matter how they
-# were uploaded. Every method above prompts for a comment if one is missing.
+#  Every key is checked with ssh-keygen. This stops a private key from
+#  being saved to the profile or pushed into VMs by mistake.
+#
+#  GitHub removes key comments, so you are offered the chance to add one.
+#  (Without a comment the key shows blank in the Proxmox UI.)
 # =============================================================================
 
-# Checks whether a key string has a comment (3rd field). If not, prompts the
-# user to add one. Returns the key string (with comment appended if provided).
-_ensure_key_comment() {
-    local key="$1"
-    local field_count
-    field_count=$(awk '{print NF}' <<< "$key")
-    if (( field_count >= 3 )); then
-        echo "$key"
+# Returns 0 if every non-blank line is a valid public key.
+_valid_pubkeys() {
+    local keys="$1" line
+    [[ "$keys" == *"PRIVATE KEY"* ]] && return 1
+    while IFS= read -r line; do
+        [[ -z "${line//[[:space:]]/}" ]] && continue
+        if command -v ssh-keygen &>/dev/null; then
+            ssh-keygen -l -f - <<< "$line" &>/dev/null || return 1
+        else
+            [[ "$line" =~ ^(ssh-|ecdsa-|sk-) ]] || return 1
+        fi
+    done <<< "$keys"
+}
+
+# Validates keys, adds a comment where missing, then sets SSH_KEY.
+# Usage: _accept_ssh_key "<key text>" "<where it came from>"
+_accept_ssh_key() {
+    local keys="$1" source="$2" line comment="" needs_comment="no" out=""
+    local -a fields
+
+    # Drop blank lines and Windows line endings.
+    keys="$(tr -d '\r' <<< "$keys" | sed '/^[[:space:]]*$/d')"
+
+    if [[ -z "$keys" ]]; then
+        warn "No key found. SSH key will not be set."
+        SSH_KEY=""
         return
     fi
-    # Redirect UI to stderr: this function is called inside $() so stdout
-    # is captured into SSH_KEY; any echo to stdout other than the key itself
-    # would corrupt the value.
-    echo "" >&2
-    info "This key has no comment: Proxmox will show it as blank in the UI." >&2
-    read -rp "  Add a comment (e.g. hostname or key purpose, leave blank to skip): " comment
-    if [[ -n "$comment" ]]; then
-        echo "$key $comment"
-    else
-        echo "$key"
+    if ! _valid_pubkeys "$keys"; then
+        warn "That is not a valid SSH PUBLIC key. SSH key will not be set."
+        [[ "$keys" == *"PRIVATE KEY"* ]] && warn "It looks like a PRIVATE key. Never share that one."
+        SSH_KEY=""
+        return
     fi
+
+    while IFS= read -r line; do
+        read -ra fields <<< "$line"
+        (( ${#fields[@]} < 3 )) && needs_comment="yes"
+    done <<< "$keys"
+
+    if [[ "$needs_comment" == "yes" ]]; then
+        echo ""
+        info "Key has no comment. Proxmox would show it blank in the UI."
+        read -rp "  Add a comment (e.g. hostname or purpose; blank to skip): " comment
+    fi
+
+    while IFS= read -r line; do
+        read -ra fields <<< "$line"
+        if (( ${#fields[@]} < 3 )) && [[ -n "$comment" ]]; then
+            line="$line $comment"
+        fi
+        out+="${out:+$'\n'}$line"
+    done <<< "$keys"
+
+    SSH_KEY="$out"
+    local count
+    count="$(wc -l <<< "$SSH_KEY")"
+    success "SSH key set from $source ($count key$([[ $count -gt 1 ]] && echo s))."
 }
 
 _prompt_ssh_key() {
-    echo ""
     header "SSH Key"
 
-    # If a key is already set (e.g. from a loaded config), show it and offer options
+    # Key already loaded from profile: keep, replace or clear.
     if [[ -n "${SSH_KEY:-}" ]]; then
         echo "  A key is already set (from config):"
         echo "  ${SSH_KEY:0:72}..."
@@ -682,13 +877,10 @@ _prompt_ssh_key() {
         echo "  2) Replace it"
         echo "  3) Clear it (no SSH key)"
         echo ""
-        read -rp "Choice [1]: " choice
-        choice="${choice:-1}"
-        case "$choice" in
+        _read_index "Choice" 3 1
+        case "$PICK" in
             1) return ;;
             3) SSH_KEY=""; info "SSH key cleared."; return ;;
-            2) ;;   # fall through to selection below
-            *) warn "Invalid choice, keeping existing key."; return ;;
         esac
     fi
 
@@ -700,446 +892,624 @@ _prompt_ssh_key() {
     echo "  4) Fetch from GitHub (by username)"
     echo "  5) Skip: no SSH key"
     echo ""
-    read -rp "Choice [1]: " method
-    method="${method:-1}"
+    _read_index "Choice" 5 1
 
-    case "$method" in
+    case "$PICK" in
         1)
             read -rp "Paste your public key: " input
-            if [[ -z "$input" ]]; then
-                warn "No key entered. SSH key will not be set."
-                SSH_KEY=""
-            else
-                SSH_KEY="$(_ensure_key_comment "$input")"
-                success "Key accepted."
-            fi
+            _accept_ssh_key "$input" "pasted input"
             ;;
         2)
             read -rp "Path to .pub file: " pub_path
-            pub_path="${pub_path/#\~/$HOME}"   # expand ~ manually
-            if [[ ! -f "$pub_path" ]]; then
+            pub_path="${pub_path/#\~/$HOME}"
+            if [[ -f "$pub_path" ]]; then
+                _accept_ssh_key "$(cat "$pub_path")" "$pub_path"
+            else
                 warn "File not found: $pub_path. SSH key will not be set."
                 SSH_KEY=""
-            else
-                SSH_KEY="$(_ensure_key_comment "$(cat "$pub_path")")"
-                success "Key loaded from: $pub_path"
             fi
             ;;
         3)
-            local pub_files=()
+            local pub_files=() i
             mapfile -t pub_files < <(find "$HOME/.ssh" -maxdepth 1 -name "*.pub" 2>/dev/null | sort)
             if [[ ${#pub_files[@]} -eq 0 ]]; then
-                warn "No .pub files found in $HOME/.ssh/: SSH key will not be set."
+                warn "No .pub files found in $HOME/.ssh/. SSH key will not be set."
                 SSH_KEY=""
                 return
             fi
             echo ""
             echo "  Available keys:"
-            local i=1
-            for f in "${pub_files[@]}"; do
-                printf "  %d) %s\n" "$i" "$f"
-                ((i++))
+            for i in "${!pub_files[@]}"; do
+                printf "  %d) %s\n" "$((i + 1))" "${pub_files[$i]}"
             done
             echo ""
-            read -rp "Select key (number): " sel
-            if [[ "$sel" =~ ^[0-9]+$ ]] && (( sel >= 1 && sel <= ${#pub_files[@]} )); then
-                SSH_KEY="$(_ensure_key_comment "$(cat "${pub_files[$((sel-1))]}")")"
-                success "Key loaded: ${pub_files[$((sel-1))]}"
-            else
-                warn "Invalid selection: SSH key will not be set."
-                SSH_KEY=""
-            fi
+            _read_index "Select key" "${#pub_files[@]}"
+            _accept_ssh_key "$(cat "${pub_files[$((PICK - 1))]}")" "${pub_files[$((PICK - 1))]}"
             ;;
         4)
             read -rp "GitHub username: " gh_user
-            if [[ -z "$gh_user" ]]; then
-                warn "No username entered: SSH key will not be set."
+            if [[ ! "$gh_user" =~ ^[A-Za-z0-9-]+$ ]]; then
+                warn "Invalid GitHub username. SSH key will not be set."
                 SSH_KEY=""
             else
                 info "Fetching keys from github.com/${gh_user}..."
-                local gh_keys
-                gh_keys=$(wget -qO- "https://github.com/${gh_user}.keys" 2>/dev/null || true)
-                if [[ -z "$gh_keys" ]]; then
-                    warn "No public keys found for GitHub user '${gh_user}'."
-                    warn "SSH key will not be set: double-check the username."
-                    SSH_KEY=""
-                else
-                    # GitHub strips comments: store the raw key and prompt for comment
-                    SSH_KEY="$(_ensure_key_comment "$gh_keys")"
-                    success "GitHub key set for user: $gh_user"
-                fi
+                _accept_ssh_key "$(wget -qO- "https://github.com/${gh_user}.keys" 2>/dev/null || true)" \
+                    "GitHub user $gh_user"
             fi
             ;;
         5)
             SSH_KEY=""
-            info "No SSH key will be set. You can add one manually after cloning."
-            ;;
-        *)
-            warn "Invalid choice: SSH key will not be set."
-            SSH_KEY=""
+            info "No SSH key will be set. You can add one to clones later."
             ;;
     esac
 }
 
 # =============================================================================
-# cloud-init snippets / user-data (optional)
-# =============================================================================
-# Proxmox can attach a user-data YAML snippet to a VM, so cloud-init applies
-# it on first boot of every clone.
+#  CLOUD-INIT SNIPPET (optional)
+#  A small YAML file attached as cloud-init *vendor-data*.
+#  Every clone runs it on first boot.
 #
-# Optional. If the chosen storage supports the 'snippets' content type, we
-# offer to create a minimal user-data file that:
-#   - turns on password auth (off by default in Ubuntu cloud images)
-#   - sets a few sensible first-boot defaults
-# Users are free to edit it before cloning.
+#  Why vendor-data and not user-data?
+#    Custom user-data REPLACES what Proxmox generates, so clones would lose
+#    the user, password, SSH keys and hostname set in the Cloud-Init tab.
+#    Vendor-data is merged in, so those all keep working.
+#
+#  Needs a storage with the 'Snippets' content type enabled.
 # =============================================================================
 SNIPPETS_ENABLED="no"
-SNIPPETS_STOR=""
+SNIPPETS_STOR="${SNIPPETS_STOR:-}"
 SNIPPETS_FILE=""
+SNIPPET_PATH=""          # full path on disk, set when attached
+
+_snippet_storages() {
+    pvesm status --content snippets 2>/dev/null | awk 'NR>1 && $3=="active" {print $1}'
+}
 
 _prompt_snippets() {
-    # Unattended mode: only proceed if SNIPPETS_STOR is already in the config.
-    # If not, skip the search entirely, that was the user's call when they
-    # built the profile.
+    # Unattended: only use snippets if the profile names a storage.
     if [[ "$UNATTENDED" == "yes" ]]; then
-        if [[ -n "${SNIPPETS_STOR:-}" ]]; then
+        if [[ -n "$SNIPPETS_STOR" ]]; then
             info "Unattended mode: using snippet storage from config: $SNIPPETS_STOR"
             SNIPPETS_ENABLED="yes"
-            SNIPPETS_FILE="${TEMPL_NAME}-user-data.yaml"
+            SNIPPETS_FILE="${TEMPL_NAME}-vendor-data.yaml"
         else
             info "Unattended mode: no snippet storage configured, skipping."
         fi
         return
     fi
 
-    echo ""
-    header "cloud-init User-Data Snippet (optional)"
+    header "Cloud-Init Snippet (optional)"
 
-    # Find storages that have 'snippets' content type enabled
-    info "Searching for snippet-capable storage pools..."
     local snippet_stores=()
-    while IFS= read -r line; do
-        local name
-        name=$(awk '{print $1}' <<< "$line")
-        [[ "$name" == "Name" ]] && continue
-        # pvesm status doesn't show content; use pvesm list to check
-        if pvesm list "$name" --content snippets &>/dev/null 2>&1; then
-            snippet_stores+=("$name")
-        fi
-    done < <(pvesm status)
+    mapfile -t snippet_stores < <(_snippet_storages)
 
     if [[ ${#snippet_stores[@]} -eq 0 ]]; then
-        info "No storage pools with 'snippets' content type found."
-        info "To use this feature, enable 'Snippets' on a storage pool in the Proxmox UI."
+        info "No storage has the 'Snippets' content type enabled. Skipping."
+        info "To use this: Datacenter > Storage > Edit > Content > tick 'Snippets'."
         return
     fi
 
-    echo "  A cloud-init user-data snippet can be attached to this template."
-    echo "  Every VM cloned from it will automatically receive these settings"
-    echo "  on first boot: useful for package updates, SSH hardening, etc."
+    echo "  A snippet is a file for your own first-boot settings on every clone"
+    echo "  (e.g. extra packages or commands). It starts with examples to edit."
+    if [[ -z "${SSH_KEY:-}" ]]; then
+        echo "  It will also allow SSH login with a password, because you set no"
+        echo "  SSH key and Ubuntu cloud images only allow key login by default."
+    fi
     echo ""
-    echo "  The generated snippet will:"
-    echo "    - Enable password authentication over SSH (disabled by default"
-    echo "      in Ubuntu cloud images: important if you don't set an SSH key)"
-    echo "    - Run apt-get upgrade on first boot"
-    echo "    - Set the hostname from the VM name"
+    echo "  Not needed for SSH keys, disk resizing or package upgrades:"
+    echo "  Proxmox and cloud-init already handle those."
     echo ""
-    read -rp "Create a user-data snippet? (y/N): " choice
-    choice="${choice:-N}"
-    [[ ! "$choice" =~ ^[Yy]$ ]] && return
+    echo "  Cluster? The snippet storage must be reachable from every node a"
+    echo "  clone may run or migrate on, or the clone won't start there."
+    echo ""
+    read -rp "Create a snippet? (y/N): " choice
+    if [[ ! "${choice:-N}" =~ ^[Yy]$ ]]; then
+        # Forget any profile value too, so unattended runs respect this "no".
+        SNIPPETS_STOR=""
+        return
+    fi
 
-    # If only one snippet store, use it; otherwise ask
     if [[ ${#snippet_stores[@]} -eq 1 ]]; then
         SNIPPETS_STOR="${snippet_stores[0]}"
         info "Using snippets storage: $SNIPPETS_STOR"
     else
         echo ""
-        echo "  Available snippet-capable storages:"
-        local i=1
-        for s in "${snippet_stores[@]}"; do
-            echo "  $i) $s"
-            ((i++))
+        echo "  Snippet-capable storages:"
+        local i
+        for i in "${!snippet_stores[@]}"; do
+            echo "  $((i + 1))) ${snippet_stores[$i]}"
         done
-        read -rp "Select storage (number): " sel
-        if [[ "$sel" =~ ^[0-9]+$ ]] && (( sel >= 1 && sel <= ${#snippet_stores[@]} )); then
-            SNIPPETS_STOR="${snippet_stores[$((sel-1))]}"
-        else
-            warn "Invalid selection: skipping snippet creation."
-            return
-        fi
+        _read_index "Select storage" "${#snippet_stores[@]}" 1
+        SNIPPETS_STOR="${snippet_stores[$((PICK - 1))]}"
     fi
 
     SNIPPETS_ENABLED="yes"
-    SNIPPETS_FILE="${TEMPL_NAME}-user-data.yaml"
+    SNIPPETS_FILE="${TEMPL_NAME}-vendor-data.yaml"
 }
 
 apply_snippets() {
-    [[ "$SNIPPETS_ENABLED" != "yes" ]] && return
+    [[ "$SNIPPETS_ENABLED" == "yes" ]] || return 0
+    header "Cloud-Init Snippet"
 
-    header "cloud-init User-Data Snippet"
+    local volid="${SNIPPETS_STOR}:snippets/${SNIPPETS_FILE}"
+    local snippet_path
+    snippet_path="$(pvesm path "$volid" 2>/dev/null)" || true
 
-    # Resolve the filesystem path for this storage
-    local stor_path
-    stor_path=$(pvesm path "${SNIPPETS_STOR}:snippets" 2>/dev/null \
-                || pvesm status | awk -v s="$SNIPPETS_STOR" '$1==s {print $NF}')
-
-    # Fallback: read path from pvesm config
-    if [[ -z "$stor_path" || ! -d "$stor_path" ]]; then
-        stor_path=$(grep -A5 "^${SNIPPETS_STOR}:" /etc/pve/storage.cfg \
-                    | grep 'path' | awk '{print $2}')
-        stor_path="${stor_path}/snippets"
-    fi
-
-    if [[ -z "$stor_path" || ! -d "$stor_path" ]]; then
-        warn "Could not resolve snippets directory for '$SNIPPETS_STOR'. Skipping."
+    if [[ -z "$snippet_path" ]]; then
+        warn "Could not find the snippets folder for '$SNIPPETS_STOR'. Skipping."
         SNIPPETS_ENABLED="no"
         return
     fi
+    mkdir -p "$(dirname "$snippet_path")"
+    SNIPPET_PATH="$snippet_path"
 
-    local snippet_path="${stor_path}/${SNIPPETS_FILE}"
+    # Never overwrite a snippet the user may have edited.
+    if [[ -f "$snippet_path" ]]; then
+        info "Snippet already exists, keeping your version: $snippet_path"
+        info "(Delete it and re-run to regenerate.)"
+    else
+        # Password login over SSH: only switched on when no SSH key was set.
+        local pwauth="# ssh_pwauth: true"
+        [[ -z "${SSH_KEY:-}" ]] && pwauth="ssh_pwauth: true"
 
-    cat > "$snippet_path" <<EOF
+        cat > "$snippet_path" <<EOF
 #cloud-config
-# cloud-init user-data snippet for: ${TEMPL_NAME}
+# Cloud-init VENDOR-DATA for: ${TEMPL_NAME}
 # Generated by ${SCRIPT_NAME} on $(date '+%Y-%m-%d %H:%M')
 #
-# This file is applied on first boot of every VM cloned from this template.
-# Edit it before cloning to customise first-boot behaviour.
-# Reference: https://cloudinit.readthedocs.io/en/latest/reference/examples.html
+# Runs on first boot of every clone.
+# Merged with the Proxmox Cloud-Init tab (user, password, SSH keys, hostname).
+# If both set the same thing, the Cloud-Init tab wins.
+#
+# Examples: https://cloudinit.readthedocs.io/en/latest/reference/examples.html
 
-# Allow SSH password authentication.
-# Set to 'false' if you are using SSH keys exclusively (recommended).
-ssh_pwauth: true
+# Not needed here (Proxmox / cloud-init already do these):
+#   - SSH keys: Cloud-Init tab.
+#   - Package upgrades: Cloud-Init tab > "Upgrade packages".
+#   - Growing the root disk: runs on every boot, so later resizes work too.
 
-# Update package list and upgrade all packages on first boot.
-package_update: true
-package_upgrade: true
+# SSH login with a password. Ubuntu cloud images allow key login only.
+# On only if no SSH key was set when this file was made.
+${pwauth}
 
-# Install additional packages on first boot (add to the list as needed).
+# Extra packages on first boot. Uncomment and add as needed.
 # packages:
 #   - curl
 #   - git
 #   - vim
 
-# Set the hostname from the VM/instance name provided by the datasource.
-preserve_hostname: false
+# Commands to run once, on first boot. Uncomment and add as needed.
+# runcmd:
+#   - echo "hello from first boot" > /root/first-boot.txt
 
-# Grow the root partition/filesystem to fill the disk automatically.
-# (cloud-utils-growpart handles this; included in VIRT_PKGS above.)
-growpart:
-  mode: auto
-  devices: ["/"]
-
-# Final message logged to /var/log/cloud-init-output.log on completion.
+# Logged to /var/log/cloud-init-output.log when done.
 final_message: |
   Cloud-init finished for ${TEMPL_NAME}.
   Up \$UPTIME seconds. Version: \$VERSION. Datasource: \$DATASOURCE.
 EOF
+        success "Snippet written to: $snippet_path"
+    fi
 
-    success "Snippet written to: $snippet_path"
-
-    # Attach the snippet to the VM as user-data
-    qm set "$VMID" --cicustom "user=${SNIPPETS_STOR}:snippets/${SNIPPETS_FILE}"
-    success "Snippet attached to VM $VMID as user-data."
-    info "Edit the snippet at any time before cloning:"
-    info "  $snippet_path"
+    qm set "$VMID" --cicustom "vendor=${volid}" >/dev/null
+    success "Snippet attached to VM $VMID as vendor-data."
+    info "Edit it at any time: $snippet_path"
 }
 
 # =============================================================================
-# User-facing prompts for remaining variables
+#  CPU AND MEMORY
+#  Sockets: only asked on hosts with more than one NUMA node (usually
+#  multi-CPU servers). NUMA is switched on for the VM when sockets > 1,
+#  so Proxmox can keep each socket's RAM on the matching host node.
+#  Ballooning: lets Proxmox reclaim unused RAM from the VM when the host
+#  runs low. BALLOON is the minimum the VM keeps. 0 = ballooning off.
 # =============================================================================
+
+# Number of NUMA nodes on this host (1 on most single-CPU machines).
+_host_numa_nodes() {
+    local n
+    n="$(compgen -G '/sys/devices/system/node/node[0-9]*' | wc -l)"
+    echo $(( n > 0 ? n : 1 ))
+}
+
+_numa_flag() { (( SOCKETS > 1 )) && echo 1 || echo 0; }
+
+# e.g. "1 socket x 2 cores (host)" or "2 sockets x 4 cores (host, NUMA on)"
+_cpu_summary() {
+    local s="socket"
+    (( SOCKETS > 1 )) && s="sockets"
+    echo "$SOCKETS $s x $CORES cores ($CPU_TYPE$( (( SOCKETS > 1 )) && echo ", NUMA on"))"
+}
+
+# e.g. "2048 MB (ballooning, min 768 MB)" or "2048 MB (ballooning off)"
+_mem_summary() {
+    if (( BALLOON > 0 )); then
+        echo "$MEM MB (ballooning, min $BALLOON MB)"
+    else
+        echo "$MEM MB (ballooning off)"
+    fi
+}
+
+# Unattended: values come from the profile, so check them before any work.
+_validate_cpu_mem() {
+    local v
+    for v in SOCKETS CORES MEM; do
+        [[ "${!v}" =~ ^[1-9][0-9]*$ ]] || die "Invalid $v '${!v}' in config. Use a whole number above 0."
+    done
+    [[ "$BALLOON" =~ ^[0-9]+$ ]] || die "Invalid BALLOON '$BALLOON' in config. Use a whole number (0 = off)."
+    (( BALLOON <= MEM )) || die "BALLOON ($BALLOON MB) can't be more than MEM ($MEM MB)."
+}
+
+_prompt_cpu_mem() {
+    local host_cpus host_mem_mb numa_nodes
+    host_cpus="$(nproc)"
+    host_mem_mb=$(( $(awk '/^MemTotal:/ {print $2}' /proc/meminfo) / 1024 ))
+    numa_nodes="$(_host_numa_nodes)"
+
+    echo ""
+    echo "CPU and memory. This host has ${host_cpus} CPU threads, ${host_mem_mb} MB RAM"
+    echo "and ${numa_nodes} NUMA node$( (( numa_nodes > 1 )) && echo s)."
+
+    # --- Sockets (NUMA hosts only) ---
+    if (( numa_nodes > 1 )); then
+        echo ""
+        echo "This host is NUMA (several CPU sockets, each with its own RAM)."
+        echo "  1 socket   Best for small VMs."
+        echo "  ${numa_nodes} sockets  For big VMs: spreads over every node, NUMA on."
+        _read_number "CPU sockets" "$SOCKETS" 1 "$numa_nodes"
+        SOCKETS="$NUM"
+    else
+        SOCKETS=1
+    fi
+
+    # --- Cores ---
+    _read_number "CPU cores$( (( SOCKETS > 1 )) && echo " per socket")" "$CORES" 1 $(( host_cpus / SOCKETS ))
+    CORES="$NUM"
+
+    # --- Memory ---
+    _read_number "Memory in MB" "$MEM" 512 "$host_mem_mb"
+    MEM="$NUM"
+
+    # --- Ballooning ---
+    echo ""
+    echo "Ballooning lets Proxmox take back unused RAM when the host runs low."
+    local b_def="Y" b_hint="Y/n"
+    [[ "$BALLOON" == "0" ]] && b_def="N" && b_hint="y/N"
+    read -rp "Use memory ballooning? (${b_hint}): " input
+    if [[ "${input:-$b_def}" =~ ^[Yy]$ ]]; then
+        local floor="$BALLOON"
+        (( floor == 0 )) && floor=$(( MEM / 2 ))
+        _read_number "Minimum memory in MB (the VM never drops below this)" "$floor" 256 "$MEM"
+        BALLOON="$NUM"
+    else
+        BALLOON=0
+    fi
+    info "CPU: $(_cpu_summary)"
+    info "Memory: $(_mem_summary)"
+}
+
+# =============================================================================
+#  NETWORK
+#  Proxmox does not check the bridge exists when the VM is created, only
+#  when it starts. So check here, or every clone would fail to boot.
+# =============================================================================
+
+# Bridges on this host: Linux bridges (incl. SDN vnets) and anything named
+# vmbr* (covers Open vSwitch bridges, which have no /bridge folder).
+_host_bridges() {
+    local d n
+    for d in /sys/class/net/*; do
+        n="${d##*/}"
+        if [[ -d "$d/bridge" || "$n" == vmbr* ]]; then
+            echo "$n"
+        fi
+    done | sort -u
+}
+
+_valid_vlan() {
+    [[ -z "$1" ]] && return 0
+    [[ "$1" =~ ^[0-9]+$ ]] && (( 10#$1 >= 1 && 10#$1 <= 4094 ))
+}
+
+# Unattended: check network and disk values from the profile before any work.
+_validate_net_disk() {
+    # Must be one of this host's bridges (not empty, not a plain NIC like eth0).
+    _host_bridges | grep -qxF -- "$NET_BRIDGE" \
+        || die "Bridge '$NET_BRIDGE' (NET_BRIDGE in config) is not a bridge on this host. Found: $(_host_bridges | tr '\n' ' ')"
+    _valid_vlan "$VLAN" || die "Invalid VLAN '$VLAN' in config. Use 1-4094, or empty for none."
+    [[ "$DISK_SIZE" =~ ^[0-9]+G$ ]] && (( 10#${DISK_SIZE%G} >= 4 )) \
+        || die "Invalid DISK_SIZE '$DISK_SIZE' in config. Use a number of GB followed by G, at least 4G (e.g. 15G)."
+}
+
+_prompt_bridge() {
+    local bridges=() i default_num=1
+    mapfile -t bridges < <(_host_bridges)
+    [[ ${#bridges[@]} -gt 0 ]] || die "No network bridges found on this host (e.g. vmbr0)."
+
+    echo ""
+    echo "Network bridge (the VM's network card connects to this):"
+    for i in "${!bridges[@]}"; do
+        printf "  %d) %s\n" "$((i + 1))" "${bridges[$i]}"
+        [[ "${bridges[$i]}" == "$NET_BRIDGE" ]] && default_num=$((i + 1))
+    done
+    _read_index "Select bridge" "${#bridges[@]}" "$default_num"
+    NET_BRIDGE="${bridges[$((PICK - 1))]}"
+    info "Bridge set to: $NET_BRIDGE"
+}
+
+# =============================================================================
+#  REMAINING QUESTIONS
+#  Tip: at any prompt showing [a value], press Enter to keep it.
+# =============================================================================
+
+# Reads a password twice, hidden. Blank = use the generated one.
+_prompt_password() {
+    local p1 p2
+    while true; do
+        read -rsp "Cloud-Init password [Enter = auto-generate]: " p1; echo
+        if [[ -z "$p1" ]]; then
+            CLOUD_PASSWORD="$CLOUD_PASSWORD_DEFAULT"
+            PASSWORD_GENERATED="yes"
+            info "Generated password: $CLOUD_PASSWORD  (also shown at the end)"
+            return
+        fi
+        read -rsp "Confirm password: " p2; echo
+        if [[ "$p1" == "$p2" ]]; then
+            CLOUD_PASSWORD="$p1"
+            return
+        fi
+        warn "Passwords did not match. Try again."
+    done
+}
+
 user_prompts() {
-    # In unattended mode all values come from the config file.
-    # Password is always auto-generated (never saved to config).
+    # Unattended: everything comes from the profile. Password is generated.
     if [[ "$UNATTENDED" == "yes" ]]; then
         TEMPL_NAME="${TEMPL_NAME:-$TEMPL_NAME_DEFAULT}"
+        _valid_vm_name "$TEMPL_NAME" \
+            || die "Invalid template name '$TEMPL_NAME'. Use letters, digits, '-' and '.' only."
+        _valid_tags "$TAG" \
+            || die "Invalid tags '$TAG'. Use letters, digits, '_', '-', '+', '.', separated by ';'."
+        [[ "$CI_UPGRADE" =~ ^[01]$ ]] \
+            || die "Invalid CI_UPGRADE '$CI_UPGRADE' in config. Use 1 (yes) or 0 (no)."
+        _validate_cpu_mem
+        _validate_net_disk
         CLOUD_USER="${CLOUD_USER_DEFAULT}"
         CLOUD_PASSWORD="${CLOUD_PASSWORD_DEFAULT}"
-        EXTRA_VIRT_PKGS="${EXTRA_VIRT_PKGS:-}"
+        PASSWORD_GENERATED="yes"
         info "Unattended mode: using all values from config."
-        info "Cloud-Init password will be auto-generated and shown at the end."
+        info "Cloud-Init password will be generated and shown at the end."
+        _prompt_snippets
         return
     fi
 
     header "Template Configuration"
+    echo "  Press Enter to accept the value in [brackets]."
+    echo ""
 
-    # Template name: use --name flag value if already set
+    # --- Name ---
     if [[ -z "${TEMPL_NAME:-}" ]]; then
-        read -rp "Template name [${TEMPL_NAME_DEFAULT}]: " input
-        TEMPL_NAME="${input:-$TEMPL_NAME_DEFAULT}"
+        while true; do
+            read -rp "Template name [${TEMPL_NAME_DEFAULT}]: " input
+            TEMPL_NAME="${input:-$TEMPL_NAME_DEFAULT}"
+            _valid_vm_name "$TEMPL_NAME" && break
+            warn "Use letters, digits, '-' and '.' only (no spaces or underscores)."
+        done
     else
+        _valid_vm_name "$TEMPL_NAME" \
+            || die "Invalid --name '$TEMPL_NAME'. Use letters, digits, '-' and '.' only."
         info "Using template name from --name flag: $TEMPL_NAME"
     fi
 
-    # Cloud-init user
+    # --- Login ---
     read -rp "Cloud-Init username [${CLOUD_USER_DEFAULT}]: " input
     CLOUD_USER="${input:-$CLOUD_USER_DEFAULT}"
+    _prompt_password
 
-    # Cloud-init password
-    read -rp "Cloud-Init password [auto-generated]: " input
-    CLOUD_PASSWORD="${input:-$CLOUD_PASSWORD_DEFAULT}"
-    if [[ "$input" == "$CLOUD_PASSWORD_DEFAULT" || -z "$input" ]]; then
-        info "Using generated password: $CLOUD_PASSWORD"
-    fi
-
-    # SSH key
     _prompt_ssh_key
 
-    # Extra packages
+    # --- Packages ---
     echo ""
-    read -rp "Extra packages to install (comma-separated, blank for none) [${EXTRA_VIRT_PKGS:-none}]: " input
-    EXTRA_VIRT_PKGS="${input:-$EXTRA_VIRT_PKGS}"
+    echo "Extra packages, comma separated (e.g. curl,git). Enter '-' for none."
+    read -rp "Extra packages [${EXTRA_VIRT_PKGS:-none}]: " input
+    [[ "$input" == "-" ]] && EXTRA_VIRT_PKGS="" || EXTRA_VIRT_PKGS="${input:-$EXTRA_VIRT_PKGS}"
+    EXTRA_VIRT_PKGS="${EXTRA_VIRT_PKGS// /}"
 
-    # VLAN
-    echo ""
-    read -rp "VLAN tag (leave blank for none) [${VLAN:-}]: " input
-    VLAN="${input:-$VLAN}"
+    # --- Network ---
+    _prompt_bridge
+    while true; do
+        read -rp "VLAN tag, 1-4094 ('-' for none) [${VLAN:-none}]: " input
+        [[ "$input" == "-" ]] && { VLAN=""; break; }
+        input="${input:-$VLAN}"
+        if _valid_vlan "$input"; then
+            [[ -n "$input" ]] && input=$((10#$input))
+            VLAN="$input"
+            break
+        fi
+        warn "VLAN must be a number from 1 to 4094."
+    done
 
-    # Disk size: user enters a number, G is appended automatically
+    # --- Disk size ---
     echo ""
-    local disk_default_num="${DISK_SIZE//[^0-9]/}"   # strip any existing unit
-    echo "Disk size in GB (numbers only: 'G' will be added automatically):"
-    read -rp "Disk size in GB [${disk_default_num}]: " input
-    input="${input//[^0-9]/}"                         # strip any unit the user typed anyway
-    input="${input:-$disk_default_num}"
-    DISK_SIZE="${input}G"
+    local disk_default_num="${DISK_SIZE//[^0-9]/}"
+    while true; do
+        read -rp "Disk size in GB, numbers only [${disk_default_num}]: " input
+        input="${input//[^0-9]/}"
+        input="${input:-$disk_default_num}"
+        [[ -n "$input" ]] && (( 10#$input >= 4 )) && break
+        warn "Use at least 4 GB (the Ubuntu image itself is about 3.5 GB)."
+    done
+    DISK_SIZE="$((10#$input))G"
     info "Disk size set to: $DISK_SIZE"
 
-    # Tags
+    # --- Tags ---
     echo ""
-    echo "VM tags are used to organise and filter VMs in the Proxmox UI."
-    echo "Separate multiple tags with semicolons (e.g. template;ubuntu;noble)."
-    read -rp "Tags [${TAG}]: " input
-    TAG="${input:-$TAG}"
+    echo "Tags help filter VMs in the Proxmox UI. Separate with ';' (e.g. template;ubuntu)."
+    while true; do
+        read -rp "Tags [${TAG}]: " input
+        input="${input:-$TAG}"
+        if _valid_tags "$input"; then
+            TAG="$input"
+            break
+        fi
+        warn "Tags may use letters, digits, '_', '-', '+' and '.' only."
+    done
 
-    # CPU type: numbered list to prevent typos
+    # --- CPU type ---
     echo ""
     local cpu_options=("host" "kvm64" "x86-64-v2-AES" "x86-64-v3")
     local cpu_descriptions=(
-        "Recommended: exposes host CPU directly, best performance. Use unless you need live migration across different CPU generations."
-        "Safer for mixed-CPU clusters: lower performance but broadly compatible."
-        "Broader feature set than kvm64, still widely compatible with modern hardware."
-        "Good balance of features for modern homogeneous environments."
+        "Fastest. Best for most homelabs."
+        "Most compatible. For live migration between different CPUs."
+        "Compatible with most modern CPUs, more features than kvm64."
+        "Modern CPUs only (Haswell / Zen 1 or newer)."
     )
     echo "CPU type:"
-    local default_cpu_num=1
+    local default_cpu_num=1 idx marker
     for idx in "${!cpu_options[@]}"; do
-        local marker=""
-        [[ "${cpu_options[$idx]}" == "$CPU_TYPE" ]] && marker=" (current)" && default_cpu_num=$((idx+1))
-        printf "  %d) %-18s %s\n" "$((idx+1))" "${cpu_options[$idx]}${marker}" "${cpu_descriptions[$idx]}"
+        marker=""
+        if [[ "${cpu_options[$idx]}" == "$CPU_TYPE" ]]; then
+            marker=" *"
+            default_cpu_num=$((idx + 1))
+        fi
+        printf "  %d) %-16s %s\n" "$((idx + 1))" "${cpu_options[$idx]}${marker}" "${cpu_descriptions[$idx]}"
     done
+    echo "  (* = current)"
     echo ""
-    read -rp "Select CPU type [${default_cpu_num}]: " input
-    input="${input:-$default_cpu_num}"
-    if [[ "$input" =~ ^[0-9]+$ ]] && (( input >= 1 && input <= ${#cpu_options[@]} )); then
-        CPU_TYPE="${cpu_options[$((input-1))]}"
-    else
-        warn "Invalid selection, keeping: $CPU_TYPE"
-    fi
+    _read_index "Select CPU type" "${#cpu_options[@]}" "$default_cpu_num"
+    CPU_TYPE="${cpu_options[$((PICK - 1))]}"
     info "CPU type set to: $CPU_TYPE"
 
-    # cloud-init snippets / user-data
+    _prompt_cpu_mem
+
+    # --- Package upgrades on first boot (Proxmox "Upgrade packages") ---
+    echo ""
+    echo "Upgrade all packages when a clone first boots?"
+    echo "Slower first boot, but clones start fully patched."
+    local up_def="N" up_hint="y/N"
+    [[ "$CI_UPGRADE" == "1" ]] && up_def="Y" && up_hint="Y/n"
+    read -rp "Upgrade packages on first boot? (${up_hint}): " input
+    [[ "${input:-$up_def}" =~ ^[Yy]$ ]] && CI_UPGRADE="1" || CI_UPGRADE="0"
+    info "Upgrade on first boot: $([[ "$CI_UPGRADE" == "1" ]] && echo yes || echo no)"
+
     _prompt_snippets
 }
 
 # =============================================================================
-# Image download with SHA256 verification
-# =============================================================================
-# Strategy: keep a pristine, untouched copy of the downloaded image alongside
-# the working copy. virt-customize only touches the working copy, so the
-# pristine copy's checksum stays valid for comparing against upstream later.
+#  IMAGE DOWNLOAD (SHA256 verified)
+#  Two copies are kept in WORK_DIR:
+#    <image>.pristine  Exactly as downloaded. Cached between runs.
+#    <image>           Working copy. Customised, imported, then deleted.
 #
-# Flow:
-#   1. No pristine copy exists → download, verify SHA256, save as pristine,
-#      copy to working image.
-#   2. Pristine exists, checksum matches upstream → copy pristine to working
-#      image (fast, no download needed).
-#   3. Pristine exists, checksum mismatches → Ubuntu has published a new image;
-#      prompt user to re-download or continue with the existing pristine.
+#  Each run:
+#    No cache                  -> download, verify, cache it.
+#    Cache matches upstream    -> reuse it. No download.
+#    Cache differs (new image) -> re-download (or ask, if interactive).
 # =============================================================================
 download_image() {
     header "Image Download"
     mkdir -p "$WORK_DIR"
-    cd "$WORK_DIR" || die "Cannot cd to $WORK_DIR"
+    WORK_STARTED="yes"
 
     local image_path="$WORK_DIR/$DISK_IMAGE"
     local pristine_path="$WORK_DIR/${DISK_IMAGE}.pristine"
+    local checksum_file="$WORK_DIR/SHA256SUMS_${DISTRO_VER}"
 
     info "Fetching SHA256SUMS from upstream..."
-    local checksum_file="$WORK_DIR/SHA256SUMS_${DISTRO_VER}"
     wget -qO "$checksum_file" "$CHECKSUM_URL" \
         || die "Failed to download SHA256SUMS from $CHECKSUM_URL"
 
+    # Exact filename match. Lines look like: <hash> *<filename>
     local expected_checksum
-    expected_checksum=$(grep "$DISK_IMAGE" "$checksum_file" | awk '{print $1}')
-    [[ -z "$expected_checksum" ]] \
-        && die "Could not find checksum for $DISK_IMAGE in SHA256SUMS."
+    expected_checksum="$(awk -v f="$DISK_IMAGE" '$2==f || $2=="*"f {print $1; exit}' "$checksum_file")"
+    [[ -n "$expected_checksum" ]] || die "Could not find checksum for $DISK_IMAGE in SHA256SUMS."
 
     if [[ -f "$pristine_path" ]]; then
-        info "Pristine image found. Verifying against upstream checksum..."
-        local pristine_checksum
-        pristine_checksum=$(sha256sum "$pristine_path" | awk '{print $1}')
-
-        if [[ "$pristine_checksum" == "$expected_checksum" ]]; then
-            success "Pristine image is current. Copying to working image..."
-            cp "$pristine_path" "$image_path"
-            success "Working image ready."
+        info "Cached image found. Verifying against upstream checksum..."
+        if [[ "$(sha256sum "$pristine_path" | awk '{print $1}')" == "$expected_checksum" ]]; then
+            success "Cached image is current. No download needed."
+            _make_working_copy "$pristine_path" "$image_path"
             return
-        else
-            warn "Pristine image checksum differs from upstream."
-            warn "Ubuntu has likely published a newer version of $DISK_IMAGE."
-            echo ""
-            echo "  1) Re-download the new image from Ubuntu (recommended)"
-            echo "  2) Continue with the existing pristine image as-is"
-            echo ""
-            read -rp "Choice [1]: " redownload_choice
-            redownload_choice="${redownload_choice:-1}"
-            if [[ "$redownload_choice" == "1" ]]; then
-                info "Removing old pristine image..."
-                rm -f "$pristine_path"
-                # Fall through to fresh download below
-            else
-                warn "Using existing pristine image. Note it may be outdated."
-                cp "$pristine_path" "$image_path"
-                return
-            fi
         fi
+
+        warn "Cached image differs from upstream. Ubuntu has published a newer build."
+        local redownload="1"
+        if [[ "$UNATTENDED" == "yes" ]]; then
+            info "Unattended mode: downloading the newer image."
+        else
+            echo ""
+            echo "  1) Download the new image (recommended)"
+            echo "  2) Keep using the cached image"
+            echo ""
+            _read_index "Choice" 2 1
+            redownload="$PICK"
+        fi
+
+        if [[ "$redownload" == "2" ]]; then
+            warn "Using the cached image. It may be out of date."
+            _make_working_copy "$pristine_path" "$image_path"
+            return
+        fi
+        rm -f "$pristine_path"
     fi
 
     info "Downloading $DISK_IMAGE..."
-    wget -nv --show-progress -O "$pristine_path" "$IMAGE_URL" \
-        || { rm -f "$pristine_path"; die "Image download failed."; }
+    wget -nv --show-progress -O "${pristine_path}.part" "$IMAGE_URL" \
+        || { rm -f "${pristine_path}.part"; die "Image download failed."; }
 
     info "Verifying downloaded image..."
     local actual_checksum
-    actual_checksum=$(sha256sum "$pristine_path" | awk '{print $1}')
+    actual_checksum="$(sha256sum "${pristine_path}.part" | awk '{print $1}')"
     if [[ "$actual_checksum" != "$expected_checksum" ]]; then
-        rm -f "$pristine_path"
-        die "Checksum verification failed! Expected: $expected_checksum | Got: $actual_checksum"
+        rm -f "${pristine_path}.part"
+        die "Checksum verification failed!
+  Expected: $expected_checksum
+  Got:      $actual_checksum"
     fi
+    mv "${pristine_path}.part" "$pristine_path"
     success "Image verified: $DISK_IMAGE"
 
-    info "Copying pristine image to working copy..."
-    cp "$pristine_path" "$image_path"
+    _make_working_copy "$pristine_path" "$image_path"
+}
+
+# Copy-on-write clone where the filesystem supports it (instant on ZFS/BTRFS/XFS).
+_make_working_copy() {
+    cp --reflink=auto "$1" "$2"
     success "Working image ready."
 }
 
 # =============================================================================
-# Single consolidated virt-customize call
+#  IMAGE CUSTOMISATION
+#  One virt-customize call. Each call boots a small helper VM,
+#  so doing everything at once saves time.
 # =============================================================================
 customize_image() {
     header "Image Customisation"
     local image_path="$WORK_DIR/$DISK_IMAGE"
-    local vc_args=()
+    local ds_cfg="$WORK_DIR/99_pve.cfg"
 
-    vc_args+=(-a "$image_path")
+    # Tell cloud-init to only look for Proxmox's datasources (faster boot).
+    cat > "$ds_cfg" <<EOF
+# Managed by ${SCRIPT_NAME}
+# To update, run: dpkg-reconfigure cloud-init
+datasource_list: [ NoCloud, ConfigDrive ]
+EOF
 
-    # Timezone
-    if [[ -n "${TZ:-}" ]]; then
-        vc_args+=(--timezone "$TZ")
-    fi
+    # Strip spaces: older profiles saved lists like "curl, git".
+    local all_pkgs="$VIRT_PKGS${EXTRA_VIRT_PKGS:+,$EXTRA_VIRT_PKGS}"
+    all_pkgs="${all_pkgs//[[:space:]]/}"
+    local vc_args=(
+        -a "$image_path"
+        --update
+        --install "$all_pkgs"
+        --upload "${ds_cfg}:/etc/cloud/cloud.cfg.d/99_pve.cfg"
+        # Installing packages can create a machine-id. Clones sharing one
+        # get the same DHCP lease, so blank it; systemd makes a new one on boot.
+        --run-command "truncate -s 0 /etc/machine-id"
+    )
 
-    # Locale and X11 keyboard (firstboot so localectl is available)
+    [[ -n "${TZ:-}" ]] && vc_args+=(--timezone "$TZ")
+
+    # First boot, because localectl needs a running system.
     if [[ "${SET_X11:-}" == "yes" ]]; then
         vc_args+=(
             --firstboot-command "localectl set-locale LANG=${LOCAL_LANG}"
@@ -1147,48 +1517,26 @@ customize_image() {
         )
     fi
 
-    # Packages: update + core + optional extras
-    local all_pkgs="$VIRT_PKGS"
-    if [[ -n "${EXTRA_VIRT_PKGS:-}" ]]; then
-        all_pkgs="${all_pkgs},${EXTRA_VIRT_PKGS}"
-    fi
-    vc_args+=(--update --install "$all_pkgs")
-
-    info "Running virt-customize (this may take a few minutes)..."
+    info "Running virt-customize (this can take a few minutes)..."
     virt-customize "${vc_args[@]}" || die "virt-customize failed."
     success "Image customised."
 }
 
 # =============================================================================
-# Proxmox cloud-init datasource config
-# =============================================================================
-inject_cloud_init_config() {
-    header "Cloud-Init Datasource Config"
-    local cfg="$WORK_DIR/99_pve.cfg"
-    cat > "$cfg" <<'EOF'
-# Managed by create-ubuntu-cloud-template.sh
-# To update, run: dpkg-reconfigure cloud-init
-datasource_list: [ NoCloud, ConfigDrive ]
-EOF
-    virt-customize -a "$WORK_DIR/$DISK_IMAGE" \
-        --upload "${cfg}:/etc/cloud/cloud.cfg.d/"
-    success "Datasource config injected."
-}
-
-# =============================================================================
-# VM creation
+#  VM CREATION
 # =============================================================================
 create_vm() {
     header "VM Creation"
-    local net_opts="virtio,bridge=${NET_BRIDGE}"
-    [[ -n "${VLAN:-}" ]] && net_opts+=",tag=${VLAN}"
+    local net_opts="virtio,bridge=${NET_BRIDGE}${VLAN:+,tag=${VLAN}}"
 
     info "Creating VM $VMID ($TEMPL_NAME)..."
     qm create "$VMID" \
         --name       "$TEMPL_NAME" \
         --memory     "$MEM" \
         --balloon    "$BALLOON" \
+        --sockets    "$SOCKETS" \
         --cores      "$CORES" \
+        --numa       "$(_numa_flag)" \
         --cpu        "$CPU_TYPE" \
         --bios       "$BIOS" \
         --machine    "$MACHINE" \
@@ -1197,62 +1545,65 @@ create_vm() {
         --net0       "$net_opts" \
         --tags       "$TAG" \
         --rng0       "source=/dev/urandom" \
-        --boot       "c" \
-        --bootdisk   "scsi0" \
         --tablet     "0" \
+        --scsihw     "virtio-scsi-single" \
         --ipconfig0  "ip=dhcp" \
         --ciuser     "$CLOUD_USER" \
         --cipassword "$CLOUD_PASSWORD" \
-        --ciupgrade  "0"
-    # Mark VM as created: error handler will destroy it if anything fails from here
+        --ciupgrade  "$CI_UPGRADE"
+    # From here on, a failure removes this VM automatically.
     VMID_CREATED="$VMID"
 
-    info "Importing disk (format: $STORAGE_FORMAT, backend: $STORAGE_BACKEND)..."
-    if [[ "$STORAGE_FORMAT" == "raw" ]]; then
-        qm importdisk "$VMID" "$WORK_DIR/$DISK_IMAGE" "$DISK_STOR"
-    else
-        qm importdisk "$VMID" "$WORK_DIR/$DISK_IMAGE" "$DISK_STOR" -format qcow2
-    fi
+    local fmt_opt=""
+    [[ -n "$STORAGE_FORMAT" ]] && fmt_opt=",format=${STORAGE_FORMAT}"
 
-    # Disk reference format differs only for dir-backed storage
-    local disk_ref
-    if [[ "$STORAGE_BACKEND" == "dir" ]]; then
-        disk_ref="${DISK_STOR}:${VMID}/vm-${VMID}-disk-0.qcow2"
-    else
-        disk_ref="${DISK_STOR}:vm-${VMID}-disk-0"
-    fi
-
-    # EFI disk format option differs only for dir-backed storage
-    local efi_fmt=""
-    [[ "$STORAGE_BACKEND" == "dir" ]] && efi_fmt=",format=qcow2"
-
-    # ZFS manages its own caching (ARC); adding a host-level cache layer causes
-    # double-buffering and can corrupt data on power loss. Use the Proxmox
-    # "Default (no cache)" value (cache=none) for ZFS, write-through elsewhere.
-    local disk_cache="writethrough"
-    [[ "$STORAGE_BACKEND" == "zfs" ]] && disk_cache="none"
-
+    # Syntax per the qm manual:
+    #   STORAGE:0,import-from=<path>  import an existing image as a new disk.
+    #     Proxmox names the disk itself, so there is no guessing
+    #     'vm-<id>-disk-0' (which breaks if an old orphaned disk has that name).
+    #   STORAGE:cloudinit             the cloud-init drive.
+    #   STORAGE:1 for the EFI disk    size is ignored; Proxmox copies the EFI
+    #     vars template. ms-cert records which Microsoft keys were enrolled.
+    info "Importing disk (format: ${STORAGE_FORMAT:-auto})..."
     qm set "$VMID" \
-        --scsihw  "virtio-scsi-single" \
-        --scsi0   "${disk_ref},cache=${disk_cache},discard=on,iothread=1,ssd=1" \
-        --scsi1   "${DISK_STOR}:cloudinit" \
-        --efidisk0 "${DISK_STOR}:0,efitype=4m${efi_fmt},ms-cert=2023k,pre-enrolled-keys=1,size=1M"
+        --scsi0    "${DISK_STOR}:0,import-from=${WORK_DIR}/${DISK_IMAGE}${fmt_opt},cache=${DISK_CACHE},discard=on,iothread=1,ssd=1" \
+        --scsi1    "${DISK_STOR}:cloudinit" \
+        --efidisk0 "${DISK_STOR}:1,efitype=4m${fmt_opt},pre-enrolled-keys=1,ms-cert=2023k" \
+        --boot     "order=scsi0"
 
-    qm cloudinit update "$VMID"
+    success "VM $VMID created."
+}
 
-    # qm set --description mangles newlines when passed through shell expansion.
-    # Write directly via python3 which handles multiline strings cleanly.
-    python3 - "$VMID" <<PYEOF
-import subprocess, sys
-vmid = sys.argv[1]
-desc = """\
+# Notes on the VM's Summary page in Proxmox.
+# Runs after apply_snippets, so the snippet note matches what was attached.
+set_vm_description() {
+    qm set "$VMID" --description "$(_vm_description)" >/dev/null
+}
+
+_vm_description() {
+    local upgrade_note="> **Package upgrades on first boot are off.**
+> Turn on in Cloud-Init > Upgrade packages, or upgrade after cloning."
+    [[ "$CI_UPGRADE" == "1" ]] && upgrade_note="> **Packages are upgraded on first boot.**
+> Turn off in Cloud-Init > Upgrade packages."
+
+    # Read the attached file itself: it may be an older, hand-edited one.
+    local snippet_note=""
+    [[ "$SNIPPETS_ENABLED" == "yes" ]] && snippet_note="
+> **First boot also runs the snippet** \`${SNIPPETS_STOR}:snippets/${SNIPPETS_FILE}\`$(grep -qE '^ssh_pwauth:[[:space:]]*true' "$SNIPPET_PATH" 2>/dev/null && echo "
+> (includes SSH password login).")"
+
+    cat <<EOF
 **OS:** ${OS_NAME}
 
 **Template created:** $(date '+%Y-%m-%d %H:%M')
 
-**Storage:** ${DISK_STOR} (${STORAGE_BACKEND}/${STORAGE_FORMAT})
+**Storage:** ${DISK_STOR} (${STORAGE_TYPE}/${STORAGE_FORMAT:-auto})
 
-**CPU type:** ${CPU_TYPE}
+**CPU:** $(_cpu_summary)
+
+**Memory:** $(_mem_summary)
+
+**Disk cache:** ${DISK_CACHE}
 
 **Cloud-Init user:** ${CLOUD_USER}
 
@@ -1260,70 +1611,56 @@ desc = """\
 
 ### Notes
 
-> **SSH password authentication is DISABLED** by default in Ubuntu cloud images.
-> If you are not using an SSH key, enable it in the cloud-init user-data snippet,
-> or add this to \`/etc/ssh/sshd_config\` after first boot:
-> \`PasswordAuthentication yes\`
+> **SSH login:** use the SSH key from the Cloud-Init tab.
+> Ubuntu cloud images allow key login only. For password login, enable
+> \`ssh_pwauth\` in a cloud-init snippet, or set \`PasswordAuthentication yes\`
+> in \`/etc/ssh/sshd_config\` after first boot.
 
-> **Automatic package upgrades on first boot are disabled** (\`ciupgrade=0\`).
-> Run upgrades manually or via your config management tool after cloning.
+${upgrade_note}
+${snippet_note}
 
 ---
 
 ### Before re-templating this VM, run inside it:
 
 \`\`\`
-apt-get clean
-&& apt -y autoremove --purge
-&& apt -y autoclean
-&& cloud-init clean
-&& echo -n > /etc/machine-id
-&& echo -n > /var/lib/dbus/machine-id
-&& sync
-&& history -c
-&& history -w
-&& fstrim -av
-&& shutdown now
+apt-get clean && \\
+apt-get -y autoremove --purge && \\
+cloud-init clean && \\
+truncate -s 0 /etc/machine-id && \\
+rm -f /var/lib/dbus/machine-id && \\
+history -c && history -w && \\
+fstrim -av && \\
+shutdown now
 \`\`\`
-"""
-subprocess.run(["qm", "set", vmid, "--description", desc], check=True)
-PYEOF
-    success "VM $VMID created."
+EOF
 }
 
 # =============================================================================
-# SSH key
-# =============================================================================
-# qm set --sshkeys expects a real file path (one key per line, OpenSSH format).
-# GitHub keys are now fetched and comment-checked during _prompt_ssh_key, so
-# by this point SSH_KEY is always a literal key string regardless of source.
+#  APPLY SSH KEY
 # =============================================================================
 apply_ssh_key() {
-    [[ -z "${SSH_KEY:-}" ]] && return
+    [[ -n "${SSH_KEY:-}" ]] || return 0
     header "SSH Key"
 
-    local key="${SSH_KEY}"
-
-    # Handle legacy config entries where SSH_KEY was saved as "github.com/<user>"
-    # instead of the actual fetched key string. Fetch the real key on the fly.
-    if [[ "$key" == github.com/* ]]; then
-        local gh_user="${key#github.com/}"
-        info "Config contains a GitHub reference, fetching key for user: $gh_user"
-        key=$(wget -qO- "https://github.com/${gh_user}.keys" 2>/dev/null | tr -d '\r\n' || true)
-        if [[ -z "$key" ]]; then
-            die "Could not fetch SSH key from github.com/${gh_user}.keys. Check the username and your internet connection."
-        fi
-        # Update SSH_KEY so write_config saves the literal key going forward
-        SSH_KEY="$key"
-        info "Key fetched. Profile will be updated with the literal key on next save."
+    # SSH_KEY may be "github.com/<user>" instead of the key itself.
+    # Fetch the current keys from GitHub on every run.
+    if [[ "$SSH_KEY" == github.com/* ]]; then
+        local gh_user="${SSH_KEY#github.com/}" keys
+        info "Config has a GitHub reference. Fetching keys for: $gh_user"
+        keys="$(wget -qO- "https://github.com/${gh_user}.keys" 2>/dev/null | tr -d '\r' || true)"
+        _valid_pubkeys "$keys" && [[ -n "$keys" ]] \
+            || die "Could not fetch valid keys from github.com/${gh_user}.keys."
+        SSH_KEY="$keys"
     fi
 
-    qm set "$VMID" --sshkey <(echo "${key}")
+    # qm wants a file, one key per line.
+    qm set "$VMID" --sshkeys <(printf '%s\n' "$SSH_KEY") >/dev/null
     success "SSH key applied."
 }
 
 # =============================================================================
-# Disk resize
+#  DISK RESIZE
 # =============================================================================
 resize_disk() {
     header "Disk Resize"
@@ -1332,277 +1669,255 @@ resize_disk() {
 }
 
 # =============================================================================
-# Convert to template (optional)
-# =============================================================================
-# Priority order:
-#   1. --template / --no-template CLI flag
-#   2. CONVERT_TO_TEMPLATE value from a loaded config file
-#   3. Interactive prompt (default: no, to encourage customisation first)
+#  CONVERT TO TEMPLATE (optional)
+#  Decided by, in order:
+#    1. --template / --no-template
+#    2. CONVERT_TO_TEMPLATE in the profile
+#    3. Asking you (default: no, so you can customise first)
 # =============================================================================
 maybe_convert_to_template() {
     header "Convert to Proxmox Template"
 
-    local do_convert="${CONVERT_TO_TEMPLATE:-}"
-
-    # In unattended mode with no explicit flag, default to no conversion
-    if [[ "$UNATTENDED" == "yes" && -z "$do_convert" ]]; then
-        do_convert="no"
-        info "Unattended mode: skipping template conversion. Run 'qm template $VMID' when ready."
-    fi
-
-    if [[ -z "$do_convert" ]]; then
-        echo "  Converting to a template locks the VM and makes it read-only."
-        echo "  Skip this step if you want to boot the VM first and customise it"
-        echo "  (with Ansible, manual config, etc.) before templating."
-        echo ""
-        read -rp "Convert VM $VMID to a Proxmox template now? (y/N): " choice
-        choice="${choice:-N}"
-        [[ "$choice" =~ ^[Yy]$ ]] && do_convert="yes" || do_convert="no"
-    fi
-
-    if [[ "$do_convert" == "yes" ]]; then
-        qm template "$VMID"
-        success "VM $VMID converted to template."
-    else
-        info "Skipping template conversion: VM $VMID left as a regular VM."
-        info "To convert later, run:  qm template $VMID"
-    fi
-}
-
-# =============================================================================
-# Cleanup
-# =============================================================================
-cleanup() {
-    header "Cleanup"
-    local cfg="$WORK_DIR/99_pve.cfg"
-    local checksum_file="$WORK_DIR/SHA256SUMS_${DISTRO_VER:-unknown}"
-
-    [[ -f "$cfg" ]]           && rm -vf "$cfg"
-    [[ -f "$checksum_file" ]] && rm -vf "$checksum_file"
-    # Clean up any leftover notes temp files
-    rm -f /tmp/proxmox-notes-*.txt 2>/dev/null || true
-
-    # Working image (virt-customised): always remove, it's single-use
-    local image_path="$WORK_DIR/${DISK_IMAGE:-}"
-    if [[ -n "${DISK_IMAGE:-}" && -f "$image_path" ]]; then
-        info "Removing working image (already imported into Proxmox)..."
-        rm -vf "$image_path"
-    fi
-
-    # Pristine image: offer to keep for future runs (saves re-downloading)
-    local pristine_path="$WORK_DIR/${DISK_IMAGE:-}.pristine"
-    if [[ -n "${DISK_IMAGE:-}" && -f "$pristine_path" ]]; then
+    if [[ -z "${CONVERT_TO_TEMPLATE:-}" ]]; then
         if [[ "$UNATTENDED" == "yes" ]]; then
-            info "Unattended mode: keeping pristine image for future runs."
+            CONVERT_TO_TEMPLATE="no"
         else
+            echo "  A template is read-only and can only be cloned."
+            echo "  Say no if you want to boot it and customise it first."
             echo ""
-            echo "  The pristine (unmodified) image is kept at:"
-            echo "  $pristine_path"
-            echo "  Keeping it avoids re-downloading on future runs (~$(du -sh "$pristine_path" | cut -f1))."
-            read -rp "  Delete the pristine image? (y/N): " choice
-            choice="${choice:-N}"
-            if [[ "$choice" =~ ^[Yy]$ ]]; then
-                rm -vf "$pristine_path"
-                success "Pristine image deleted."
-            else
-                info "Pristine image kept for future runs."
-            fi
+            read -rp "Convert VM $VMID to a template now? (y/N): " choice
+            [[ "${choice:-N}" =~ ^[Yy]$ ]] && CONVERT_TO_TEMPLATE="yes" || CONVERT_TO_TEMPLATE="no"
         fi
     fi
+
+    if [[ "$CONVERT_TO_TEMPLATE" == "yes" ]]; then
+        qm template "$VMID"
+        TEMPLATE_CONVERTED="yes"
+        success "VM $VMID converted to template."
+    else
+        info "Left as a regular VM. To convert later:  qm template $VMID"
+    fi
 }
 
 # =============================================================================
-# Config profile: name capture and file write are separate so the file can
-# be written immediately after the user confirms, before any work begins.
+#  CLEANUP
+#  Usage: cleanup           normal run; asks about the cached image
+#         cleanup failed    after an error; keeps the cache, no questions
 # =============================================================================
+cleanup() {
+    local mode="${1:-}"
+    header "Cleanup"
 
-# Step 1: ask for a profile name right after the user presses Y.
-# Sets PROFILE_NAME and PROFILE_PATH; empty means the user declined.
-prompt_config_name() {
-    echo ""
-    info "Your answers can be saved as a reusable profile now, before the run begins."
-    info "If something goes wrong mid-run you can restart with: ./${SCRIPT_NAME} --config <profile>.conf"
-    echo ""
-    read -rp "Save a profile? Enter a name (e.g. noble-webserver) or leave blank to skip: " profile_name
-    profile_name="${profile_name// /-}"   # replace spaces with hyphens
+    rm -f "$WORK_DIR/99_pve.cfg" "$WORK_DIR/SHA256SUMS_${DISTRO_VER:-unknown}"
 
-    if [[ -z "$profile_name" ]]; then
-        info "No profile will be saved."
-        PROFILE_NAME=""
-        PROFILE_PATH=""
+    [[ -n "${DISK_IMAGE:-}" ]] || return 0
+
+    # Working copy is single-use: always remove.
+    rm -f "$WORK_DIR/$DISK_IMAGE" "$WORK_DIR/${DISK_IMAGE}.pristine.part"
+    info "Temporary files removed."
+
+    local pristine_path="$WORK_DIR/${DISK_IMAGE}.pristine"
+    [[ -f "$pristine_path" ]] || return 0
+
+    if [[ "$mode" == "failed" || "$UNATTENDED" == "yes" ]]; then
+        info "Cached image kept for next time: $pristine_path"
         return
     fi
 
-    PROFILE_NAME="$profile_name"
-    PROFILE_PATH="${SCRIPT_DIR}/${PROFILE_NAME}.conf"
+    echo ""
+    echo "  Cached image: $pristine_path ($(du -sh "$pristine_path" | cut -f1))"
+    echo "  Keeping it skips the download next time."
+    read -rp "  Delete the cached image? (y/N): " choice
+    if [[ "${choice:-N}" =~ ^[Yy]$ ]]; then
+        rm -f "$pristine_path"
+        success "Cached image deleted."
+    else
+        info "Cached image kept."
+    fi
+}
 
-    # Warn if a file with that name already exists
-    if [[ -f "$PROFILE_PATH" ]]; then
-        warn "A profile already exists at: $PROFILE_PATH"
-        read -rp "Overwrite it? (y/N): " ow
-        ow="${ow:-N}"
-        if [[ ! "$ow" =~ ^[Yy]$ ]]; then
-            info "Profile not saved."
-            PROFILE_NAME=""
-            PROFILE_PATH=""
-            return
-        fi
+# =============================================================================
+#  PROFILE (.conf)
+#  Saved right after you confirm the summary, BEFORE any work starts.
+#  So if the run fails, your answers are not lost.
+#  It is saved again at the end to record the template yes/no answer.
+# =============================================================================
+PROFILE_NAME=""
+PROFILE_PATH=""
+
+prompt_config_name() {
+    echo ""
+    info "Save these answers as a profile to re-use them (or retry if this run fails)."
+    read -rp "Profile name (e.g. noble-webserver, blank to skip): " profile_name
+    profile_name="${profile_name// /-}"
+
+    if [[ -z "$profile_name" ]]; then
+        info "No profile will be saved."
+        return
+    fi
+    if [[ ! "$profile_name" =~ ^[A-Za-z0-9._-]+$ ]]; then
+        warn "Use only letters, numbers, '.', '_' and '-'. Profile not saved."
+        return
     fi
 
+    local path="${SCRIPT_DIR}/${profile_name}.conf"
+    if [[ -f "$path" ]]; then
+        warn "A profile already exists at: $path"
+        read -rp "Overwrite it? (y/N): " ow
+        [[ "${ow:-N}" =~ ^[Yy]$ ]] || { info "Profile not saved."; return; }
+    fi
+
+    PROFILE_NAME="$profile_name"
+    PROFILE_PATH="$path"
     write_config
 }
 
-# Step 2: write the config file. Called immediately after prompt_config_name
-# and again at the end of a successful run to update CONVERT_TO_TEMPLATE if
-# the user answered that interactively.
 write_config() {
-    [[ -z "${PROFILE_PATH:-}" ]] && return
+    [[ -n "$PROFILE_PATH" ]] || return 0
 
-    cat > "$PROFILE_PATH" <<EOF
+    # umask: the profile may hold your SSH key, so keep it private to root.
+    ( umask 077; cat > "$PROFILE_PATH" <<EOF
+# =============================================================================
 # Profile: ${PROFILE_NAME}
 # Generated by ${SCRIPT_NAME} on $(date '+%Y-%m-%d %H:%M')
-# Usage: ./${SCRIPT_NAME} --config ${PROFILE_NAME}.conf
+# Use it:  ./${SCRIPT_NAME} --config ${PROFILE_NAME}.conf
 #
-# Note: VMID is intentionally not saved. It is always assigned interactively
-# or defaulted to VMID_DEFAULT to avoid clashes on subsequent runs.
+# Not saved on purpose:
+#   - VM ID: chosen each run, to avoid clashes (use --vmid / --auto-vmid).
+#   - Password: generated fresh each run, for security.
+#   - Danger flags (--force-overwrite etc.): command line only.
+# =============================================================================
 
-# Ubuntu version
-DISTRO_VER="${DISTRO_VER}"
+# --- Ubuntu version (codename) ---
+DISTRO_VER=$(_conf_val "$DISTRO_VER")
 
-# Storage
-DISK_STOR="${DISK_STOR}"
-# STORAGE_FORMAT and STORAGE_BACKEND are auto-detected at runtime; do not set here.
+# --- Storage ---
+# Disk format is detected from the storage type at runtime.
+DISK_STOR=$(_conf_val "$DISK_STOR")
 
-# VM hardware
-VMID_DEFAULT="${VMID_DEFAULT}"
-CORES="${CORES}"
-MEM="${MEM}"
-BALLOON="${BALLOON}"
-BIOS="${BIOS}"
-MACHINE="${MACHINE}"
-CPU_TYPE="${CPU_TYPE}"
-DISK_SIZE="${DISK_SIZE}"
-OS_TYPE="${OS_TYPE}"
-NET_BRIDGE="${NET_BRIDGE}"
-VLAN="${VLAN}"
-AGENT_ENABLE="${AGENT_ENABLE}"
-FSTRIM="${FSTRIM}"
+# --- VM hardware ---
+VMID_DEFAULT=$(_conf_val "$VMID_DEFAULT")
+SOCKETS=$(_conf_val "$SOCKETS")
+CORES=$(_conf_val "$CORES")
+MEM=$(_conf_val "$MEM")
+BALLOON=$(_conf_val "$BALLOON")
+BIOS=$(_conf_val "$BIOS")
+MACHINE=$(_conf_val "$MACHINE")
+CPU_TYPE=$(_conf_val "$CPU_TYPE")
+DISK_SIZE=$(_conf_val "$DISK_SIZE")
+OS_TYPE=$(_conf_val "$OS_TYPE")
+NET_BRIDGE=$(_conf_val "$NET_BRIDGE")
+VLAN=$(_conf_val "$VLAN")
+AGENT_ENABLE=$(_conf_val "$AGENT_ENABLE")
+FSTRIM=$(_conf_val "$FSTRIM")
 
-# cloud-init snippets
-# SNIPPETS_ENABLED is re-evaluated at runtime based on storage capabilities.
-# Set SNIPPETS_STOR to pre-select a snippets storage, or leave empty to be prompted.
-SNIPPETS_STOR="${SNIPPETS_STOR:-}"
+# --- Upgrade packages on first boot? 1 = yes, 0 = no ---
+CI_UPGRADE=$(_conf_val "$CI_UPGRADE")
 
-# Template identity
-TEMPL_NAME_DEFAULT="${TEMPL_NAME}"
-TAG="${TAG}"
+# --- Cloud-init snippet ---
+# Storage to write the snippet to. Empty = no snippet in unattended runs,
+# and you are asked in interactive runs.
+SNIPPETS_STOR=$(_conf_val "$SNIPPETS_STOR")
 
-# Cloud-Init
-CLOUD_USER_DEFAULT="${CLOUD_USER}"
-# CLOUD_PASSWORD_DEFAULT is intentionally not saved for security.
+# --- Template identity ---
+TEMPL_NAME_DEFAULT=$(_conf_val "$TEMPL_NAME")
+TAG=$(_conf_val "$TAG")
 
-# SSH key
-# Unlike the script defaults, it IS safe to store your key here. This .conf
-# file is personal to you, not part of the shared script, and won't get
-# committed to any repo unless you add it yourself.
-# Can be a full public key string, or a GitHub URL (github.com/<username>).
-SSH_KEY="${SSH_KEY:-}"
+# --- Cloud-init login ---
+CLOUD_USER_DEFAULT=$(_conf_val "$CLOUD_USER")
 
-# Packages
-VIRT_PKGS="${VIRT_PKGS}"
-EXTRA_VIRT_PKGS="${EXTRA_VIRT_PKGS:-}"
+# --- SSH key(s), one per line ---
+# Safe to store here: this file is yours, not part of the shared script.
+# Can also be "github.com/<username>" to fetch keys each run.
+SSH_KEY=$(_conf_val "${SSH_KEY:-}")
 
-# Template conversion
-# Set to "yes" to always convert, "no" to always skip, or leave empty to be asked each run.
-# Can also be controlled per-run with --template or --no-template CLI flags.
-CONVERT_TO_TEMPLATE="${CONVERT_TO_TEMPLATE:-}"
+# --- Packages (comma separated) ---
+VIRT_PKGS=$(_conf_val "$VIRT_PKGS")
+EXTRA_VIRT_PKGS=$(_conf_val "${EXTRA_VIRT_PKGS:-}")
 
-# Locale
-LOCAL_LANG="${LOCAL_LANG}"
-SET_X11="${SET_X11}"
-X11_LAYOUT="${X11_LAYOUT}"
-X11_MODEL="${X11_MODEL}"
-TZ="${TZ}"
+# --- Convert to template at the end? ---
+# "yes" = always, "no" = never, "" = ask each run.
+# --template / --no-template override this.
+CONVERT_TO_TEMPLATE=$(_conf_val "${CONVERT_TO_TEMPLATE:-}")
+
+# --- Locale / keyboard ---
+LOCAL_LANG=$(_conf_val "$LOCAL_LANG")
+SET_X11=$(_conf_val "$SET_X11")
+X11_LAYOUT=$(_conf_val "$X11_LAYOUT")
+X11_MODEL=$(_conf_val "$X11_MODEL")
+TZ=$(_conf_val "$TZ")
 EOF
-
+    )
+    # umask only applies to new files; also fix profiles made by older versions.
+    chmod 600 "$PROFILE_PATH"
     success "Profile saved: $PROFILE_PATH"
 }
 
 # =============================================================================
-# Summary before proceeding
+#  SUMMARY (last chance to cancel)
 # =============================================================================
 print_summary() {
     header "Summary: Review Before Proceeding"
     echo ""
 
-    local ssh_display
-    if [[ -n "${SSH_KEY:-}" ]]; then
-        ssh_display="(set) ${SSH_KEY:0:40}..."
-    else
-        ssh_display="(none)"
-    fi
-
-    local extra_display="${EXTRA_VIRT_PKGS:-(none)}"
+    local ssh_display="(none)"
+    [[ -n "${SSH_KEY:-}" ]] && ssh_display="(set) ${SSH_KEY:0:40}..."
 
     local templ_str
     case "${CONVERT_TO_TEMPLATE:-}" in
-        yes) templ_str="Yes (--template)" ;;
-        no)  templ_str="No  (--no-template)" ;;
+        yes) templ_str="Yes" ;;
+        no)  templ_str="No" ;;
         *)   templ_str="Ask me at the end" ;;
     esac
 
-    printf "  %-24s %s\n" "OS:"                   "$OS_NAME"
-    printf "  %-24s %s\n" "VM ID:"                "$VMID"
-    printf "  %-24s %s\n" "Template name:"        "$TEMPL_NAME"
-    local cache_display="writethrough"
-    [[ "$STORAGE_BACKEND" == "zfs" ]] && cache_display="none (ZFS default)"
-    printf "  %-24s %s\n" "Storage:"              "$DISK_STOR ($STORAGE_BACKEND / $STORAGE_FORMAT, cache=$cache_display)"
-    printf "  %-24s %s\n" "Disk size:"            "$DISK_SIZE"
-    printf "  %-24s %s\n" "CPUs / RAM:"           "$CORES cores / ${MEM}MB (balloon: ${BALLOON}MB)"
-    printf "  %-24s %s\n" "BIOS / Machine:"       "$BIOS / $MACHINE"
-    printf "  %-24s %s\n" "CPU type:"             "$CPU_TYPE"
-    printf "  %-24s %s\n" "Tags:"                 "$TAG"
-    printf "  %-24s %s\n" "Network:"              "$NET_BRIDGE${VLAN:+ VLAN $VLAN}"
-    printf "  %-24s %s\n" "Cloud-Init user:"      "$CLOUD_USER"
-    printf "  %-24s %s\n" "SSH key:"              "$ssh_display"
-    printf "  %-24s %s\n" "Extra packages:"       "$extra_display"
-    printf "  %-24s %s\n" "Timezone:"             "$TZ"
-    printf "  %-24s %s\n" "Convert to template:"  "$templ_str"
+    local snippet_display="(none)"
+    [[ "$SNIPPETS_ENABLED" == "yes" ]] && snippet_display="${SNIPPETS_STOR}:snippets/${SNIPPETS_FILE}"
+
+    _row() { printf "  %-22s %s\n" "$1" "$2"; }
+    _row "OS:"                  "$OS_NAME"
+    _row "VM ID:"               "$VMID${OVERWRITE_VMID:+ (REPLACES the existing template)}"
+    _row "Template name:"       "$TEMPL_NAME"
+    _row "Storage:"             "$DISK_STOR ($STORAGE_TYPE / ${STORAGE_FORMAT:-auto}, cache=$DISK_CACHE)"
+    _row "Disk size:"           "$DISK_SIZE"
+    _row "CPU:"                 "$(_cpu_summary)"
+    _row "Memory:"              "$(_mem_summary)"
+    _row "BIOS / Machine:"      "$BIOS / $MACHINE"
+    _row "Network:"             "$NET_BRIDGE${VLAN:+ (VLAN $VLAN)}"
+    _row "Tags:"                "$TAG"
+    _row "Cloud-Init user:"     "$CLOUD_USER"
+    _row "SSH key:"             "$ssh_display"
+    _row "Extra packages:"      "${EXTRA_VIRT_PKGS:-(none)}"
+    _row "Snippet:"             "$snippet_display"
+    _row "Timezone:"            "$TZ"
+    _row "Upgrade on 1st boot:" "$([[ "$CI_UPGRADE" == "1" ]] && echo Yes || echo No)"
+    _row "Convert to template:" "$templ_str"
     echo ""
 
     if [[ "$UNATTENDED" == "yes" ]]; then
-        warn "Running in unattended mode. Starting in 5 seconds: press Ctrl+C to abort."
-        for i in 5 4 3 2 1; do
-            printf "\r  Starting in %s... " "$i"
-            sleep 1
-        done
-        printf "\r  Starting now.          \n"
+        warn "Unattended mode. Press Ctrl+C to abort."
+        _countdown "Starting"
         echo ""
-        # Config already exists (loaded via --config), no need to prompt for a name
         return
     fi
 
-    local proceed
     read -rp "Proceed? (Y/n): " proceed
-    proceed="${proceed:-Y}"
-    if [[ "$proceed" =~ ^[Nn]$ ]]; then
+    if [[ "${proceed:-Y}" =~ ^[Nn]$ ]]; then
         info "Aborted by user."
         exit 0
     fi
 
-    # Save the profile immediately, before any work begins, so answers are
-    # preserved if the run fails partway through.
     prompt_config_name
 }
 
 # =============================================================================
-# Main
+#  MAIN
 # =============================================================================
 main() {
     echo ""
     echo -e "${BOLD}Proxmox Ubuntu Cloud-Init Template Creator${RESET}"
     echo "=========================================="
 
+    # 1. Checks and questions (nothing is changed yet)
     proxmox_check
     install_packages
     select_ubuntu_version
@@ -1610,42 +1925,47 @@ main() {
     get_valid_vmid
     user_prompts
     print_summary
+
+    # 2. Build the image
     download_image
     customize_image
-    inject_cloud_init_config
+
+    # 3. Build the VM
+    replace_old_template
     create_vm
     apply_ssh_key
     apply_snippets
+    set_vm_description
     resize_disk
     maybe_convert_to_template
+
+    # Build finished: from here on, nothing may remove the VM on exit.
+    VMID_CREATED=""
+
+    # 4. Tidy up
     cleanup
 
-    # Re-write the profile if one was saved, to capture the CONVERT_TO_TEMPLATE
-    # answer if it was given interactively rather than via a CLI flag.
-    if [[ -n "${PROFILE_PATH:-}" ]]; then
+    if [[ -n "$PROFILE_PATH" ]]; then
         write_config
-        info "Profile updated: $PROFILE_PATH"
         info "Re-use with: ./${SCRIPT_NAME} --config ${PROFILE_NAME}.conf"
     fi
 
+    # --- Done ---
     echo ""
-    if [[ "${CONVERT_TO_TEMPLATE:-no}" == "yes" ]]; then
+    if [[ "$TEMPLATE_CONVERTED" == "yes" ]]; then
         success "Template '$TEMPL_NAME' (ID: $VMID) is ready to clone."
     else
         success "VM '$TEMPL_NAME' (ID: $VMID) is ready. Boot it, customise, then run: qm template $VMID"
     fi
 
-    if [[ "$UNATTENDED" == "yes" ]]; then
+    if [[ "$PASSWORD_GENERATED" == "yes" ]]; then
         echo ""
-        warn "Cloud-Init password (auto-generated: change this after first login):"
+        warn "Login details (password was generated: save it now):"
         echo "  User:     $CLOUD_USER"
         echo "  Password: $CLOUD_PASSWORD"
         echo ""
-        info "To change the password in Proxmox: qm set $VMID --cipassword '<newpassword>' && qm cloudinit update $VMID"
+        info "Change it later: qm set $VMID --cipassword '<new>' && qm cloudinit update $VMID"
     fi
-
-    # Disarm the error handler: run completed successfully
-    VMID_CREATED=""
 }
 
 main "$@"
