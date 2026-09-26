@@ -97,7 +97,7 @@ BIOS="ovmf"              # UEFI
 MACHINE="q35"
 DISK_SIZE="15G"
 OS_TYPE="l26"            # Linux 2.6+ kernel
-NET_BRIDGE="vmbr1"
+NET_BRIDGE="vmbr0"       # asked each run; must exist on this host
 VLAN=""                  # blank = untagged
 AGENT_ENABLE="1"
 FSTRIM="1"               # trim disk after cloning
@@ -447,9 +447,10 @@ _load_release_info() {
         RELEASE_STATUS["$dist"]="$status"
     done < <(
         {
-            wget -qO- --timeout=10 "https://changelogs.ubuntu.com/meta-release" || true
+            # One quick try each: this is only for labels, never worth a long wait.
+            wget -qO- --timeout=10 --tries=1 "https://changelogs.ubuntu.com/meta-release" || true
             echo "Source: development"
-            wget -qO- --timeout=10 "https://changelogs.ubuntu.com/meta-release-development" || true
+            wget -qO- --timeout=10 --tries=1 "https://changelogs.ubuntu.com/meta-release-development" || true
         } | awk -v now="$(date +%Y%m)" '
             # Records are blank-line separated. First entry per codename wins,
             # and the released list is read before the development one.
@@ -958,6 +959,7 @@ _prompt_ssh_key() {
 SNIPPETS_ENABLED="no"
 SNIPPETS_STOR="${SNIPPETS_STOR:-}"
 SNIPPETS_FILE=""
+SNIPPET_PATH=""          # full path on disk, set when attached
 
 _snippet_storages() {
     pvesm status --content snippets 2>/dev/null | awk 'NR>1 && $3=="active" {print $1}'
@@ -996,6 +998,9 @@ _prompt_snippets() {
     echo ""
     echo "  Not needed for SSH keys, disk resizing or package upgrades:"
     echo "  Proxmox and cloud-init already handle those."
+    echo ""
+    echo "  Cluster? The snippet storage must be reachable from every node a"
+    echo "  clone may run or migrate on, or the clone won't start there."
     echo ""
     read -rp "Create a snippet? (y/N): " choice
     if [[ ! "${choice:-N}" =~ ^[Yy]$ ]]; then
@@ -1036,6 +1041,7 @@ apply_snippets() {
         return
     fi
     mkdir -p "$(dirname "$snippet_path")"
+    SNIPPET_PATH="$snippet_path"
 
     # Never overwrite a snippet the user may have edited.
     if [[ -f "$snippet_path" ]]; then
@@ -1182,6 +1188,54 @@ _prompt_cpu_mem() {
 }
 
 # =============================================================================
+#  NETWORK
+#  Proxmox does not check the bridge exists when the VM is created, only
+#  when it starts. So check here, or every clone would fail to boot.
+# =============================================================================
+
+# Bridges on this host: Linux bridges (incl. SDN vnets) and anything named
+# vmbr* (covers Open vSwitch bridges, which have no /bridge folder).
+_host_bridges() {
+    local d n
+    for d in /sys/class/net/*; do
+        n="${d##*/}"
+        if [[ -d "$d/bridge" || "$n" == vmbr* ]]; then
+            echo "$n"
+        fi
+    done | sort -u
+}
+
+_valid_vlan() {
+    [[ -z "$1" ]] && return 0
+    [[ "$1" =~ ^[0-9]+$ ]] && (( 10#$1 >= 1 && 10#$1 <= 4094 ))
+}
+
+# Unattended: check network and disk values from the profile before any work.
+_validate_net_disk() {
+    [[ -e "/sys/class/net/${NET_BRIDGE}" ]] \
+        || die "Bridge '$NET_BRIDGE' (NET_BRIDGE in config) does not exist on this host. Found: $(_host_bridges | tr '\n' ' ')"
+    _valid_vlan "$VLAN" || die "Invalid VLAN '$VLAN' in config. Use 1-4094, or empty for none."
+    [[ "$DISK_SIZE" =~ ^[0-9]+G$ ]] && (( 10#${DISK_SIZE%G} >= 4 )) \
+        || die "Invalid DISK_SIZE '$DISK_SIZE' in config. Use a number of GB followed by G, at least 4G (e.g. 15G)."
+}
+
+_prompt_bridge() {
+    local bridges=() i default_num=1
+    mapfile -t bridges < <(_host_bridges)
+    [[ ${#bridges[@]} -gt 0 ]] || die "No network bridges found on this host (e.g. vmbr0)."
+
+    echo ""
+    echo "Network bridge (the VM's network card connects to this):"
+    for i in "${!bridges[@]}"; do
+        printf "  %d) %s\n" "$((i + 1))" "${bridges[$i]}"
+        [[ "${bridges[$i]}" == "$NET_BRIDGE" ]] && default_num=$((i + 1))
+    done
+    _read_index "Select bridge" "${#bridges[@]}" "$default_num"
+    NET_BRIDGE="${bridges[$((PICK - 1))]}"
+    info "Bridge set to: $NET_BRIDGE"
+}
+
+# =============================================================================
 #  REMAINING QUESTIONS
 #  Tip: at any prompt showing [a value], press Enter to keep it.
 # =============================================================================
@@ -1217,6 +1271,7 @@ user_prompts() {
         [[ "$CI_UPGRADE" =~ ^[01]$ ]] \
             || die "Invalid CI_UPGRADE '$CI_UPGRADE' in config. Use 1 (yes) or 0 (no)."
         _validate_cpu_mem
+        _validate_net_disk
         CLOUD_USER="${CLOUD_USER_DEFAULT}"
         CLOUD_PASSWORD="${CLOUD_PASSWORD_DEFAULT}"
         PASSWORD_GENERATED="yes"
@@ -1258,18 +1313,15 @@ user_prompts() {
     [[ "$input" == "-" ]] && EXTRA_VIRT_PKGS="" || EXTRA_VIRT_PKGS="${input:-$EXTRA_VIRT_PKGS}"
     EXTRA_VIRT_PKGS="${EXTRA_VIRT_PKGS// /}"
 
-    # --- VLAN ---
-    echo ""
+    # --- Network ---
+    _prompt_bridge
     while true; do
         read -rp "VLAN tag, 1-4094 ('-' for none) [${VLAN:-none}]: " input
         [[ "$input" == "-" ]] && { VLAN=""; break; }
         input="${input:-$VLAN}"
-        if [[ -z "$input" ]]; then
-            VLAN=""
-            break
-        fi
-        if [[ "$input" =~ ^[0-9]+$ ]] && (( 10#$input >= 1 && 10#$input <= 4094 )); then
-            VLAN=$((10#$input))
+        if _valid_vlan "$input"; then
+            [[ -n "$input" ]] && input=$((10#$input))
+            VLAN="$input"
             break
         fi
         warn "VLAN must be a number from 1 to 4094."
@@ -1504,13 +1556,18 @@ create_vm() {
     local fmt_opt=""
     [[ -n "$STORAGE_FORMAT" ]] && fmt_opt=",format=${STORAGE_FORMAT}"
 
-    # import-from lets Proxmox name the disk itself, so there is no guessing
-    # 'vm-<id>-disk-0' (which breaks if an old orphaned disk has that name).
+    # Syntax per the qm manual:
+    #   STORAGE:0,import-from=<path>  import an existing image as a new disk.
+    #     Proxmox names the disk itself, so there is no guessing
+    #     'vm-<id>-disk-0' (which breaks if an old orphaned disk has that name).
+    #   STORAGE:cloudinit             the cloud-init drive.
+    #   STORAGE:1 for the EFI disk    size is ignored; Proxmox copies the EFI
+    #     vars template. ms-cert records which Microsoft keys were enrolled.
     info "Importing disk (format: ${STORAGE_FORMAT:-auto})..."
     qm set "$VMID" \
         --scsi0    "${DISK_STOR}:0,import-from=${WORK_DIR}/${DISK_IMAGE}${fmt_opt},cache=${DISK_CACHE},discard=on,iothread=1,ssd=1" \
         --scsi1    "${DISK_STOR}:cloudinit" \
-        --efidisk0 "${DISK_STOR}:0,efitype=4m${fmt_opt},ms-cert=2023k,pre-enrolled-keys=1,size=1M" \
+        --efidisk0 "${DISK_STOR}:1,efitype=4m${fmt_opt},pre-enrolled-keys=1,ms-cert=2023k" \
         --boot     "order=scsi0"
 
     success "VM $VMID created."
@@ -1528,9 +1585,10 @@ _vm_description() {
     [[ "$CI_UPGRADE" == "1" ]] && upgrade_note="> **Packages are upgraded on first boot.**
 > Turn off in Cloud-Init > Upgrade packages."
 
+    # Read the attached file itself: it may be an older, hand-edited one.
     local snippet_note=""
     [[ "$SNIPPETS_ENABLED" == "yes" ]] && snippet_note="
-> **First boot also runs the snippet** \`${SNIPPETS_STOR}:snippets/${SNIPPETS_FILE}\`$([[ -z "${SSH_KEY:-}" ]] && echo "
+> **First boot also runs the snippet** \`${SNIPPETS_STOR}:snippets/${SNIPPETS_FILE}\`$(grep -qE '^ssh_pwauth:[[:space:]]*true' "$SNIPPET_PATH" 2>/dev/null && echo "
 > (includes SSH password login).")"
 
     cat <<EOF
