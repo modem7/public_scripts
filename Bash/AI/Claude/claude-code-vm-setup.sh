@@ -123,7 +123,7 @@ ask_yn() {
     if is_true "$ASSUME_YES" || [[ ! -t 0 ]]; then
       answer="y"
     else
-      read -rp "$question [Y/n]: " answer
+      read -rp "$question [Y/n]: " answer || echo   # EOF (Ctrl-D) = take the default
       answer="${answer:-y}"
     fi
   fi
@@ -135,7 +135,7 @@ ask() {
   local var="$1" question="$2" default="${3:-}" answer="${!1:-}"
   if [[ -z "$answer" ]]; then
     if ! is_true "$ASSUME_YES" && [[ -t 0 ]]; then
-      read -rp "${question}${default:+ [$default]}: " answer
+      read -rp "${question}${default:+ [$default]}: " answer || echo
     fi
     answer="${answer:-$default}"
   fi
@@ -651,22 +651,49 @@ install_claude_code() {
   echo "    Claude Code $(claude --version 2>/dev/null || echo 'installed')"
 }
 
-claude_logged_in() {
-  claude auth status --json 2>/dev/null | jq -e '.loggedIn == true' >/dev/null
+# Prints "in:<method>", "out" or "unknown". Bounded and detached from the
+# terminal: stdin is /dev/null so nothing can sit waiting on an invisible
+# prompt, and a slow/stuck check (network, first-run work) gives up after 20s
+# instead of hanging the run. Exit status is no help here — `auth status`
+# exits 1 when signed out — so only timeout's 124 is treated specially.
+claude_auth_state() {
+  local json rc=0
+  json=$(timeout 20 claude auth status --json </dev/null 2>/dev/null) || rc=$?
+  if [[ $rc -eq 124 ]] || ! jq -e . >/dev/null 2>&1 <<<"$json"; then
+    echo "unknown"
+  elif jq -e '.loggedIn == true' >/dev/null <<<"$json"; then
+    echo "in:$(jq -r '.authMethod' <<<"$json")"
+  else
+    echo "out"
+  fi
 }
+
+claude_logged_in() { [[ "$(claude_auth_state)" == in:* ]]; }
 
 claude_login() {
   is_true "$CLAUDE_LOGIN" || { info "Skipping Claude Code sign-in (declined)."; return 0; }
   step "Signing in to Claude Code"
-  if claude_logged_in; then
-    info "Already signed in ($(claude auth status --json | jq -r '.authMethod'))."
-  elif [[ -t 0 ]]; then
+  info "Checking whether you're already signed in..."
+  local state; state=$(claude_auth_state)
+  case "$state" in
+    in:*)    info "Already signed in (${state#in:})."; return 0 ;;
+    unknown) warn "Couldn't read Claude's sign-in status within 20s (network? 'claude doctor' can tell you more) — trying to sign in anyway." ;;
+  esac
+  if [[ -t 0 ]]; then
     # --claudeai: Remote Control only works with a claude.ai subscription
     # login, not Console/API billing.
     local args=(--claudeai)
     [[ -n "${CLAUDE_EMAIL:-}" ]] && args+=(--email "$CLAUDE_EMAIL")
-    echo "Open the URL below in a browser and sign in with your Pro/Max account."
-    claude auth login "${args[@]}" || warn "Claude sign-in didn't complete; run it later with: claude auth login"
+    echo "A sign-in URL will appear below. Open it in any browser (it doesn't have to be on this VM),"
+    echo "sign in with your Pro/Max account, then paste the code it gives you back here."
+    # With no display there's nothing useful to open, and a console browser
+    # (w3m/lynx as www-browser) would take over this terminal — so make the
+    # "open browser" attempt a no-op and rely on the printed URL.
+    if [[ -z "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]]; then
+      BROWSER=true claude auth login "${args[@]}" || warn "Claude sign-in didn't complete; run it later with: claude auth login"
+    else
+      claude auth login "${args[@]}" || warn "Claude sign-in didn't complete; run it later with: claude auth login"
+    fi
   else
     warn "No terminal attached — skipping Claude sign-in. Run it later with: claude auth login"
   fi
@@ -1031,11 +1058,12 @@ health_check() {
   if have claude; then check ok "Claude Code" "$(claude --version 2>/dev/null) via $CLAUDE_INSTALL_METHOD"
   else check fail "Claude Code" "not on PATH" "re-run this script"; fi
 
-  if claude_logged_in; then
-    check ok "Claude sign-in" "$(claude auth status --json | jq -r '.authMethod')"
-  else
-    check fail "Claude sign-in" "not signed in" "claude auth login"
-  fi
+  local auth; auth=$(claude_auth_state)
+  case "$auth" in
+    in:*)    check ok   "Claude sign-in" "${auth#in:}" ;;
+    unknown) check warn "Claude sign-in" "status check timed out" "claude auth status; claude doctor" ;;
+    *)       check fail "Claude sign-in" "not signed in" "claude auth login" ;;
+  esac
 
   if is_true "$SETUP_GITHUB"; then
     if gh auth status -h github.com >/dev/null 2>&1; then check ok "gh CLI" "authenticated"
@@ -1065,7 +1093,7 @@ health_check() {
     case "${RC_SERVICE_STATE:-}" in
       enabled)
         sleep 5   # a crash-looping unit shows as "activating (auto-restart)", not active
-        if ! claude_logged_in; then
+        if [[ "$auth" != in:* ]]; then
           check warn "Remote Control" "service enabled; starts once you sign in" "claude auth login"
         elif systemctl --user is-active -q "$RC_UNIT"; then
           check ok "Remote Control" "service running, starts at boot"
