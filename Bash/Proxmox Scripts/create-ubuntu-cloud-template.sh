@@ -443,7 +443,7 @@ _set_distro_vars() {
 _resolve_storage_type() {
     STORAGE_TYPE="$1"
     case "$STORAGE_TYPE" in
-        zfspool|zfs|lvmthin|lvm|rbd|iscsi|iscsidirect|btrfs)
+        zfspool|zfs|lvmthin|lvm|rbd|btrfs)
             STORAGE_FORMAT="raw" ;;
         dir|nfs|cifs|glusterfs)
             STORAGE_FORMAT="qcow2" ;;
@@ -454,8 +454,11 @@ _resolve_storage_type() {
 }
 
 # Lists active storages that accept VM disks as "name type" lines.
+# Plain iSCSI is left out: it only exposes existing LUNs and cannot create
+# new disks. (Put LVM on top of the iSCSI LUN to use it here.)
 _image_storages() {
-    pvesm status --content images 2>/dev/null | awk 'NR>1 && $3=="active" {print $1, $2}'
+    pvesm status --content images 2>/dev/null \
+        | awk 'NR>1 && $3=="active" && $2!="iscsi" && $2!="iscsidirect" {print $1, $2}'
 }
 
 select_storage() {
@@ -1209,11 +1212,15 @@ create_vm() {
         --efidisk0 "${DISK_STOR}:0,efitype=4m${fmt_opt},ms-cert=2023k,pre-enrolled-keys=1,size=1M" \
         --boot     "order=scsi0"
 
-    qm set "$VMID" --description "$(_vm_description)" >/dev/null
     success "VM $VMID created."
 }
 
-# Markdown shown on the VM's Summary page in Proxmox.
+# Notes on the VM's Summary page in Proxmox.
+# Runs after apply_snippets, so the snippet note matches what was attached.
+set_vm_description() {
+    qm set "$VMID" --description "$(_vm_description)" >/dev/null
+}
+
 _vm_description() {
     local upgrade_note="> **Package upgrades on first boot are off** (\`ciupgrade=0\`).
 > Upgrade after cloning, or with your config management tool."
@@ -1466,6 +1473,8 @@ X11_MODEL=$(_conf_val "$X11_MODEL")
 TZ=$(_conf_val "$TZ")
 EOF
     )
+    # umask only applies to new files; also fix profiles made by older versions.
+    chmod 600 "$PROFILE_PATH"
     success "Profile saved: $PROFILE_PATH"
 }
 
@@ -1552,12 +1561,15 @@ main() {
     create_vm
     apply_ssh_key
     apply_snippets
+    set_vm_description
     resize_disk
     maybe_convert_to_template
 
+    # Build finished: from here on, nothing may remove the VM on exit.
+    VMID_CREATED=""
+
     # 4. Tidy up
     cleanup
-    VMID_CREATED=""    # success: the VM must not be removed on exit
 
     if [[ -n "$PROFILE_PATH" ]]; then
         write_config
