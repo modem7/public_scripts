@@ -7,7 +7,8 @@
 #  Adapted from https://github.com/serversathome/ServersatHome/blob/main/agentic.sh
 #
 #  What it does:
-#  - Always: locale, core/build packages, Node.js LTS, Go, Rust, Claude Code.
+#  - Always: locale, core/build packages, Node.js LTS, Go, Rust, uv (Python),
+#    Claude Code.
 #  - Optional (asked up front, default yes): Docker, GitHub CLI + a dedicated
 #    GitHub SSH key (wired up in ~/.ssh/config) + `gh auth login`, the
 #    webapp-testing skill (Python Playwright), weekly unattended apt upgrades.
@@ -497,6 +498,52 @@ install_go() {
   echo "    Go $(/usr/local/go/bin/go version | awk '{print $3}')"
 }
 
+# uv: Python package/project manager (venvs, pip-compatible installs,
+# lockfiles, Python versions, and `uv tool install` / `uvx` for CLI tools).
+# Ubuntu's system Python refuses `pip install` (PEP 668), so this is how
+# Python dependencies get installed here: per project, never system-wide.
+# Installed from Astral's GitHub release, checksum-verified, like Go.
+install_uv() {
+  step "Installing uv (Python packages & projects)"
+  local target
+  case "$DPKG_ARCH" in
+    amd64) target="x86_64-unknown-linux-gnu" ;;
+    arm64) target="aarch64-unknown-linux-gnu" ;;
+    *) warn "No uv build mapped for $DPKG_ARCH — skipping uv."; return 0 ;;
+  esac
+
+  PATH="$HOME/.local/bin:$PATH"
+  local existing=""
+  have uv && existing=$(command -v uv)
+  if [[ -n "$existing" && "$existing" != "$HOME/.local/bin/uv" ]]; then
+    info "uv is already installed at $existing (managed elsewhere) — leaving it alone."
+    echo "    uv $(uv --version | awk '{print $2}')"
+    return 0
+  fi
+
+  # /releases/latest redirects to .../releases/tag/<version>.
+  local latest current="" base tarball
+  latest=$(curl -fsSLI -o /dev/null -w '%{url_effective}' https://github.com/astral-sh/uv/releases/latest) || latest=""
+  latest="${latest##*/}"
+  [[ -n "$existing" ]] && current=$(uv --version | awk '{print $2}')
+  if [[ -z "$latest" || "$latest" == "latest" ]]; then
+    warn "Couldn't look up the latest uv release${current:+; keeping uv $current}."
+    [[ -n "$current" ]] || return 0
+  elif [[ "$current" == "$latest" ]]; then
+    info "uv $current already installed."
+  else
+    base="https://github.com/astral-sh/uv/releases/download/$latest"
+    tarball="uv-$target.tar.gz"
+    curl -fsSL "$base/$tarball" -o "$WORK_DIR/$tarball"
+    curl -fsSL "$base/$tarball.sha256" -o "$WORK_DIR/$tarball.sha256"
+    ( cd "$WORK_DIR" && sha256sum -c --quiet "$tarball.sha256" ) || error "uv tarball checksum mismatch — refusing to install."
+    tar -xzf "$WORK_DIR/$tarball" -C "$WORK_DIR"
+    install -d "$HOME/.local/bin"
+    install -m 0755 "$WORK_DIR/uv-$target/uv" "$WORK_DIR/uv-$target/uvx" "$HOME/.local/bin/"
+  fi
+  echo "    uv $(uv --version | awk '{print $2}')"
+}
+
 install_rust() {
   step "Installing Rust (as your user)"
   local rustup_bin
@@ -973,6 +1020,8 @@ install_webapp_testing() {
   # The skill drives Playwright from Python scripts, so it needs the Python
   # package — the npm one alone leaves it broken.
   step "Installing Playwright (Python) + Chromium"
+  # The one deliberate exception to "never pip into system Python": the skill's
+  # helper scripts run under plain python3, so Playwright must import there.
   quiet python3 -m pip install --user --break-system-packages --upgrade playwright || error "pip install playwright failed."
   quiet python3 -m playwright install --with-deps chromium || error "Playwright browser install failed."
 }
@@ -1049,7 +1098,7 @@ deployment-engineer${docker_plugin}."
 
 ## Available Tools
 - **Languages**: Node.js $(ver 1 node --version), Python $(ver 2 python3 --version), Go $(ver 3 /usr/local/go/bin/go version), Rust $(ver 2 rustc --version)
-- **Package managers**: npm, pip (use --break-system-packages), cargo, go install
+- **Package managers**: npm, uv (Python), cargo, go install
 - **Search tools**: ripgrep (rg), fd-find (fdfind), fzf
 - **Databases**: PostgreSQL client (psql), Redis client (redis-cli), SQLite3
 ${sections}
@@ -1059,7 +1108,9 @@ ${rc_section}
 
 ## Conventions
 - Use git for version control on all projects in $PROJECT_DIR/
-- When installing Python packages, use: pip install --break-system-packages <package>"
+- Python: use a per-project environment with uv: \`uv init\` + \`uv add <pkg>\` (or \`uv venv\` +
+  \`uv pip install <pkg>\`), and run things with \`uv run\`. Never install into the system Python
+  (\`pip install\`, \`--break-system-packages\`). Python CLI tools: \`uv tool install <tool>\` or \`uvx <tool>\`."
 
   write_managed_block "$file" "$begin" "$end" "$body"
 }
@@ -1208,6 +1259,9 @@ health_check() {
     else check fail "Docker" "daemon not responding" "sudo systemctl status docker"; fi
   fi
 
+  if have uv; then check ok "uv" "$(uv --version | awk '{print $2}')"
+  else check warn "uv" "not installed" "re-run this script"; fi
+
   if [[ -f /var/run/reboot-required ]]; then
     check warn "Reboot" "required (kernel/libc updated)" "sudo reboot"
   fi
@@ -1281,6 +1335,7 @@ main() {
   install_node
   install_go
   install_rust
+  install_uv
   install_docker
   if $USE_SYNC; then setup_config_sync; else setup_local_config; fi
   enable_remote_control
