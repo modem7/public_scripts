@@ -66,7 +66,7 @@ hr() { echo; echo "== $* =="; }
 SCRIPT_URL="https://raw.githubusercontent.com/modem7/public_scripts/master/Bash/Server%20scripts/zram-to-zswap.sh"
 revert_hint() {
   if [[ -f "$0" && "$0" != "bash" && "$0" != "-bash" && "$0" != "sh" ]]; then
-    echo "sudo $0 --revert --apply"
+    echo "sudo $(printf '%q' "$0") --revert --apply"
   else
     echo "curl -s '$SCRIPT_URL' | sudo bash -s -- --revert --apply"
   fi

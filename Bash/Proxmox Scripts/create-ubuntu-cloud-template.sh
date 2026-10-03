@@ -25,10 +25,11 @@
 #    All changes are made offline with virt-customize, so the image never
 #    has to be booted before it becomes a template.
 #
-#  OPTIONAL FEATURES (profile only, all off by default)
+#  OPTIONAL FEATURES (profile only)
 #    Set these in a .conf profile. See "OPTIONAL BUILD FEATURES" below.
 #    REMOVE_SNAPD, DISABLE_IPV6, TUNED_PROFILE, ENABLE_FSTRIM_TIMER,
-#    UNATTENDED_UPGRADES, DESKTOP, DESKTOP_RDP, TABLET, VGA, GROW_IMAGE_FIRST
+#    UNATTENDED_UPGRADES (+ UU_*), DESKTOP, DESKTOP_RDP, TABLET, VGA,
+#    GROW_IMAGE_FIRST. Defaults match the stock Ubuntu image.
 #
 #    Hooks, to add your own changes without editing this script:
 #    UPLOAD_FILES, CUSTOMIZE_SCRIPTS, FIRSTBOOT_SCRIPTS, EXTRA_VC_ARGS
@@ -57,6 +58,9 @@
 #
 #  FILES IT CREATES
 #    <script dir>/<profile>.conf    Your saved answers (only if you say so).
+#                                   Private to root. Add CLOUD_PASSWORD="..."
+#                                   to it to reuse a password. Keep profiles
+#                                   out of git (e.g. *.conf in .gitignore).
 #    $WORK_DIR/*.img.pristine       Cached download. Skips re-downloading.
 #    <storage>/snippets/*.yaml      Optional cloud-init vendor-data snippet.
 #
@@ -144,60 +148,91 @@ TAG="template"
 
 # =============================================================================
 #  OPTIONAL BUILD FEATURES
-#  Profile only: there are no prompts for these. All are off by default,
-#  so profiles that don't set them build exactly as before.
+#  Set these in a profile: there are no prompts for them.
+#  Each default matches what the stock Ubuntu cloud image already does
+#  ("OS default" below), so a profile that sets none of them gets the
+#  image exactly as Ubuntu ships it, plus the packages above.
 #  Everything is applied offline by virt-customize.
 # =============================================================================
 
-# Uninstall snapd and pin it so apt never installs it again.
-# Not allowed with DESKTOP=yes (Firefox and the App Center need snaps).
+# yes = uninstall snapd and pin it (priority -10) so apt never reinstalls it.
+# no  = leave snapd alone.
+# OS default = snapd installed -> "no".
+# Not allowed with DESKTOP=yes (Firefox and the App Center are snaps).
 REMOVE_SNAPD="no"
 
-# Turn IPv6 off with a sysctl drop-in.
+# yes = turn IPv6 off (sysctl drop-in /etc/sysctl.d/99-disable-ipv6.conf).
+# no  = leave IPv6 alone.
+# OS default = IPv6 on -> "no".
 DISABLE_IPV6="no"
 
-# tuned profile to activate, e.g. "virtual-guest". Blank = skip.
-# Installs tuned if it isn't already in the package list.
+# Name of a tuned profile to activate, e.g. "virtual-guest". Installs tuned.
+# Blank = don't install or configure tuned.
+# OS default = tuned not installed -> "".
 TUNED_PROFILE=""
 
-# Enable the weekly fstrim timer inside the guest.
-ENABLE_FSTRIM_TIMER="no"
+# yes = weekly fstrim timer enabled.  no = disabled.
+# OS default = enabled -> "yes".
+ENABLE_FSTRIM_TIMER="yes"
 
-# Daily unattended upgrades. Only the schedule and reboot settings are
-# written here. Add your own origins list with UPLOAD_FILES, e.g. to
+# yes = daily package list update + unattended security upgrades.
+# no  = both switched off.
+# OS default = on -> "yes".
+# Only the schedule and reboot settings are written here. To change which
+# repos are upgraded, add your own file with UPLOAD_FILES, e.g.
 # /etc/apt/apt.conf.d/51unattended-upgrades.
-UNATTENDED_UPGRADES="no"
-UU_AUTO_REBOOT="false"   # "true" = reboot when an upgrade needs it
-UU_REBOOT_TIME="06:00"   # HH:MM, or "now"
+UNATTENDED_UPGRADES="yes"
+#   Days between clearing out old downloaded .deb files.
+#   Blank = not set (apt never auto-cleans). OS default = not set -> "".
+UU_AUTOCLEAN_DAYS=""
+#   true = reboot by itself when an upgrade needs it.  false = never.
+#   OS default = false.
+UU_AUTO_REBOOT="false"
+#   When to reboot (only used with UU_AUTO_REBOOT=true): HH:MM or "now".
+#   OS default = "now" (straight after upgrading). A quiet hour is safer.
+UU_REBOOT_TIME="06:00"
 
-# GNOME desktop: installs DESKTOP_PKGS, boots to the login screen,
-# disables sleep/suspend and skips GNOME's first-login wizard.
-# Give it more MEM, BALLOON and DISK_SIZE in the profile too
-# (e.g. 4096 / 2048 / 40G).
+# yes = GNOME desktop: installs DESKTOP_PKGS, boots to the login screen,
+#       disables sleep/suspend, skips GNOME's first-login wizard.
+# no  = server image.
+# OS default = no desktop -> "no".
+# Give a desktop more MEM, BALLOON and DISK_SIZE too (e.g. 4096 / 2048 / 40G).
 DESKTOP="no"
 DESKTOP_PKGS="ubuntu-desktop-minimal,gnome-remote-desktop,openssl"
 
-# GNOME Remote Login over RDP (needs DESKTOP=yes). Each clone makes its
-# own TLS certificate and a random password on first boot, and writes
-# the login to /root/rdp-credentials.txt.
+# yes = GNOME Remote Login over RDP (needs DESKTOP=yes). Each clone makes
+#       its own TLS certificate and random password on first boot, and
+#       writes the login to /root/rdp-credentials.txt.
+# no  = no remote login.
 DESKTOP_RDP="no"
-DESKTOP_RDP_USER="rdp"
+DESKTOP_RDP_USER="rdp"   # RDP login name (the GNOME login comes after it)
 
-# Grow the image to DISK_SIZE before customising, so large installs fit.
-# The stock image has about 1-2 GB free. Blank = yes with DESKTOP=yes.
+# Grow the image to DISK_SIZE *before* customising, so big installs fit.
+# The stock image's root disk has only about 1-2 GB free.
+#   yes = grow first (Proxmox then skips its own resize: already done).
+#   no  = customise the stock-size image; Proxmox resizes afterwards.
+#   Blank = "yes" with DESKTOP=yes, otherwise "no".
 GROW_IMAGE_FIRST=""
 
-# VM display hardware.
-TABLET=""                # tablet pointer: blank = 0 (1 with DESKTOP=yes)
-VGA=""                   # e.g. "virtio": blank = Proxmox default (virtio with DESKTOP=yes)
+# Tablet pointer device: 1 = on, 0 = off.
+#   Blank = 1 with DESKTOP=yes (mouse lines up in the console), otherwise 0
+#   (servers don't need it, and it costs a little CPU).
+#   Proxmox default = 1.
+TABLET=""
+
+# Display adapter, e.g. "virtio", "std", "qxl", "serial0".
+#   Blank = "virtio" with DESKTOP=yes, otherwise not set (Proxmox picks).
+#   Proxmox default = "std".
+VGA=""
 
 # --- Hooks ---
-# Run in this order, after the built-in steps above. Relative paths are
-# looked up next to the profile.
-#   UPLOAD_FILES       "local_path:guest_path" pairs (parent dirs are created).
+# Your own changes, without editing this script. They run in this order,
+# after the built-in steps above. Relative paths are looked up next to the
+# profile. Empty () = nothing to do.
+#   UPLOAD_FILES       "local_path:/guest/path" pairs. Parent dirs are created.
 #   CUSTOMIZE_SCRIPTS  scripts run inside the image at build time. The #! line
 #                      is honoured; with none, /bin/sh runs it.
-#   FIRSTBOOT_SCRIPTS  scripts run once, on each clone's first boot (--firstboot).
+#   FIRSTBOOT_SCRIPTS  scripts run once, on each clone's first boot.
 #   EXTRA_VC_ARGS      raw virt-customize arguments, e.g. (--memsize 4096).
 UPLOAD_FILES=()
 CUSTOMIZE_SCRIPTS=()
@@ -346,7 +381,8 @@ TEMPLATE
 
 AUTOMATION
   --unattended        No prompts. Requires --config.
-                      The password is generated and shown at the end.
+                      The password is generated and shown at the end,
+                      unless the profile sets CLOUD_PASSWORD.
                       Snippets are only used if SNIPPETS_STOR is in the profile.
 
 DANGER ZONE (deletes data)
@@ -418,6 +454,11 @@ if [[ -n "$CONFIG_FILE" ]]; then
     IFS='|' read -r UNATTENDED AUTO_VMID FORCE_OVERWRITE I_KNOW VMID_FLAG CONFIG_FILE <<< "$_safe_flags"
     unset _safe_flags
 fi
+
+# A profile may set CLOUD_PASSWORD (you add it by hand). Then it is used
+# instead of a generated one, including in --unattended runs.
+PROFILE_PASSWORD="${CLOUD_PASSWORD:-}"
+unset CLOUD_PASSWORD
 
 # Relative hook paths in a profile are looked up next to that profile.
 CONFIG_DIR="$SCRIPT_DIR"
@@ -1327,11 +1368,21 @@ _prompt_bridge() {
 #  Tip: at any prompt showing [a value], press Enter to keep it.
 # =============================================================================
 
-# Reads a password twice, hidden. Blank = use the generated one.
+# Reads a password twice, hidden.
+# Blank = the profile's CLOUD_PASSWORD if it has one, else a generated one.
 _prompt_password() {
     local p1 p2
     while true; do
-        read -rsp "Cloud-Init password [Enter = auto-generate]: " p1; echo
+        if [[ -n "$PROFILE_PASSWORD" ]]; then
+            read -rsp "Cloud-Init password [Enter = use the one in the profile]: " p1; echo
+            if [[ -z "$p1" ]]; then
+                CLOUD_PASSWORD="$PROFILE_PASSWORD"
+                info "Using the password from the profile."
+                return
+            fi
+        else
+            read -rsp "Cloud-Init password [Enter = auto-generate]: " p1; echo
+        fi
         if [[ -z "$p1" ]]; then
             CLOUD_PASSWORD="$CLOUD_PASSWORD_DEFAULT"
             PASSWORD_GENERATED="yes"
@@ -1348,7 +1399,8 @@ _prompt_password() {
 }
 
 user_prompts() {
-    # Unattended: everything comes from the profile. Password is generated.
+    # Unattended: everything comes from the profile. Password is the
+    # profile's CLOUD_PASSWORD, or generated.
     if [[ "$UNATTENDED" == "yes" ]]; then
         TEMPL_NAME="${TEMPL_NAME:-$TEMPL_NAME_DEFAULT}"
         _valid_vm_name "$TEMPL_NAME" \
@@ -1360,10 +1412,15 @@ user_prompts() {
         _validate_cpu_mem
         _validate_net_disk
         CLOUD_USER="${CLOUD_USER_DEFAULT}"
-        CLOUD_PASSWORD="${CLOUD_PASSWORD_DEFAULT}"
-        PASSWORD_GENERATED="yes"
         info "Unattended mode: using all values from config."
-        info "Cloud-Init password will be generated and shown at the end."
+        if [[ -n "$PROFILE_PASSWORD" ]]; then
+            CLOUD_PASSWORD="$PROFILE_PASSWORD"
+            info "Cloud-Init password: from the profile."
+        else
+            CLOUD_PASSWORD="${CLOUD_PASSWORD_DEFAULT}"
+            PASSWORD_GENERATED="yes"
+            info "Cloud-Init password will be generated and shown at the end."
+        fi
         _prompt_snippets
         return
     fi
@@ -1569,7 +1626,7 @@ _make_working_copy() {
 # =============================================================================
 _is_yes() { [[ "${1:-}" == "yes" ]]; }
 
-# A feature flag must be "yes" or "no" (blank counts as "no").
+# A feature flag must be "yes", "no" or blank.
 _check_yes_no() {
     local name="$1"
     [[ "${!name:-no}" =~ ^(yes|no)$ ]] || die "Invalid $name '${!name}' in config. Use yes or no."
@@ -1585,6 +1642,11 @@ _hook_path() {
 }
 
 validate_features() {
+    # Blank means "the default", which for these is the OS default: on.
+    # (For the rest, blank already means no, or "auto" for GROW_IMAGE_FIRST.)
+    ENABLE_FSTRIM_TIMER="${ENABLE_FSTRIM_TIMER:-yes}"
+    UNATTENDED_UPGRADES="${UNATTENDED_UPGRADES:-yes}"
+
     local f
     for f in REMOVE_SNAPD DISABLE_IPV6 ENABLE_FSTRIM_TIMER UNATTENDED_UPGRADES \
              DESKTOP DESKTOP_RDP GROW_IMAGE_FIRST SET_X11; do
@@ -1599,6 +1661,8 @@ validate_features() {
         || die "Invalid TUNED_PROFILE '$TUNED_PROFILE' in config."
     [[ "$UU_AUTO_REBOOT" =~ ^(true|false)$ ]] \
         || die "Invalid UU_AUTO_REBOOT '$UU_AUTO_REBOOT' in config. Use true or false."
+    [[ -z "$UU_AUTOCLEAN_DAYS" || "$UU_AUTOCLEAN_DAYS" =~ ^[0-9]+$ ]] \
+        || die "Invalid UU_AUTOCLEAN_DAYS '$UU_AUTOCLEAN_DAYS' in config. Use a number of days, or blank."
     [[ "$UU_REBOOT_TIME" =~ ^(now|([01][0-9]|2[0-3]):[0-5][0-9])$ ]] \
         || die "Invalid UU_REBOOT_TIME '$UU_REBOOT_TIME' in config. Use HH:MM or now."
     [[ "$DESKTOP_RDP_USER" =~ ^[a-z_][a-z0-9_-]*$ ]] \
@@ -1649,11 +1713,13 @@ _features_summary() {
     _is_yes "$REMOVE_SNAPD"        && on+=("no snapd")
     _is_yes "$DISABLE_IPV6"        && on+=("IPv6 off")
     [[ -n "$TUNED_PROFILE" ]]      && on+=("tuned: $TUNED_PROFILE")
-    _is_yes "$ENABLE_FSTRIM_TIMER" && on+=("fstrim timer")
-    if _is_yes "$UNATTENDED_UPGRADES"; then
-        [[ "$UU_AUTO_REBOOT" == "true" ]] \
-            && on+=("unattended upgrades (reboot at $UU_REBOOT_TIME)") \
-            || on+=("unattended upgrades (no auto reboot)")
+    # Only list what differs from the stock image.
+    _is_yes "$ENABLE_FSTRIM_TIMER" || on+=("fstrim timer off")
+    if ! _is_yes "$UNATTENDED_UPGRADES"; then
+        on+=("unattended upgrades off")
+    else
+        [[ "$UU_AUTO_REBOOT" == "true" ]] && on+=("auto-reboot at $UU_REBOOT_TIME")
+        [[ -n "$UU_AUTOCLEAN_DAYS" ]] && on+=("apt autoclean every ${UU_AUTOCLEAN_DAYS}d")
     fi
     _is_yes "$DESKTOP"             && on+=("GNOME desktop")
     _is_yes "$DESKTOP_RDP"         && on+=("RDP")
@@ -1690,15 +1756,21 @@ net.ipv6.conf.all.disable_ipv6 = 1
 net.ipv6.conf.default.disable_ipv6 = 1
 '
 
-_UU_PERIODIC='// Managed by create-ubuntu-cloud-template.sh (UNATTENDED_UPGRADES=yes)
-APT::Periodic::Update-Package-Lists "1";
-APT::Periodic::Unattended-Upgrade "1";
-APT::Periodic::AutocleanInterval "7";
-'
+# Same two lines Ubuntu ships ("1" = on), plus autoclean if set.
+_uu_periodic_conf() {
+    local val=1
+    _is_yes "$UNATTENDED_UPGRADES" || val=0
+    echo "// Managed by ${SCRIPT_NAME} (UNATTENDED_UPGRADES=${UNATTENDED_UPGRADES})"
+    echo "APT::Periodic::Update-Package-Lists \"${val}\";"
+    echo "APT::Periodic::Unattended-Upgrade \"${val}\";"
+    [[ -n "$UU_AUTOCLEAN_DAYS" && "$val" == 1 ]] \
+        && echo "APT::Periodic::AutocleanInterval \"${UU_AUTOCLEAN_DAYS}\";"
+    return 0
+}
 
 _uu_reboot_conf() {
     cat <<EOF
-// Managed by ${SCRIPT_NAME} (UNATTENDED_UPGRADES=yes)
+// Managed by ${SCRIPT_NAME} (UU_AUTO_REBOOT=true)
 Unattended-Upgrade::Automatic-Reboot "${UU_AUTO_REBOOT}";
 Unattended-Upgrade::Automatic-Reboot-Time "${UU_REBOOT_TIME}";
 EOF
@@ -1856,13 +1928,16 @@ EOF
         )
     fi
 
-    _is_yes "$ENABLE_FSTRIM_TIMER" && vc_args+=(--run-command "systemctl enable fstrim.timer")
+    if _is_yes "$ENABLE_FSTRIM_TIMER"; then
+        vc_args+=(--run-command "systemctl enable fstrim.timer")
+    else
+        vc_args+=(--run-command "systemctl disable fstrim.timer")
+    fi
 
-    if _is_yes "$UNATTENDED_UPGRADES"; then
-        vc_args+=(
-            --write "/etc/apt/apt.conf.d/20auto-upgrades:${_UU_PERIODIC}"
-            --write "/etc/apt/apt.conf.d/52unattended-reboot:$(_uu_reboot_conf)"$'\n'
-        )
+    # 20auto-upgrades is written either way: "0"s switch upgrades off.
+    vc_args+=(--write "/etc/apt/apt.conf.d/20auto-upgrades:$(_uu_periodic_conf)"$'\n')
+    if _is_yes "$UNATTENDED_UPGRADES" && [[ "$UU_AUTO_REBOOT" == "true" ]]; then
+        vc_args+=(--write "/etc/apt/apt.conf.d/52unattended-reboot:$(_uu_reboot_conf)"$'\n')
     fi
 
     if _is_yes "$DESKTOP"; then
@@ -2190,7 +2265,9 @@ write_config() {
 #
 # Not saved on purpose:
 #   - VM ID: chosen each run, to avoid clashes (use --vmid / --auto-vmid).
-#   - Password: generated fresh each run, for security.
+#   - Password: not saved by the script. To use the same one every run
+#     (e.g. --unattended), add a line yourself:  CLOUD_PASSWORD="..."
+#     Keep this file private (it is chmod 600) and out of git.
 #   - Danger flags (--force-overwrite etc.): command line only.
 # =============================================================================
 
@@ -2231,6 +2308,7 @@ TAG=$(_conf_val "$TAG")
 
 # --- Cloud-init login ---
 CLOUD_USER_DEFAULT=$(_conf_val "$CLOUD_USER")
+$( [[ -n "$PROFILE_PASSWORD" ]] && echo "CLOUD_PASSWORD=$(_conf_val "$PROFILE_PASSWORD")   # added by hand; kept on re-save" )
 
 # --- SSH key(s), one per line ---
 # Safe to store here: this file is yours, not part of the shared script.
@@ -2259,6 +2337,7 @@ DISABLE_IPV6=$(_conf_val "$DISABLE_IPV6")
 TUNED_PROFILE=$(_conf_val "$TUNED_PROFILE")
 ENABLE_FSTRIM_TIMER=$(_conf_val "$ENABLE_FSTRIM_TIMER")
 UNATTENDED_UPGRADES=$(_conf_val "$UNATTENDED_UPGRADES")
+UU_AUTOCLEAN_DAYS=$(_conf_val "$UU_AUTOCLEAN_DAYS")
 UU_AUTO_REBOOT=$(_conf_val "$UU_AUTO_REBOOT")
 UU_REBOOT_TIME=$(_conf_val "$UU_REBOOT_TIME")
 DESKTOP=$(_conf_val "$DESKTOP")
