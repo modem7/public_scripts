@@ -1,0 +1,158 @@
+# =============================================================================
+#  Example profile for create-ubuntu-cloud-template.sh
+#
+#  1. Copy it:   cp profile.conf.example my-template.conf
+#  2. Edit the copy. Apart from DISTRO_VER (which the script would ask for),
+#     every value below is the script's own default, so anything you leave
+#     alone behaves as if it weren't set.
+#  3. Build:     ./create-ubuntu-cloud-template.sh --config my-template.conf
+#     Unattended: add  --unattended --vmid 52000 --auto-vmid --template
+#
+#  Your copy can hold passwords and keys: keep it private (chmod 600) and out
+#  of git. The .gitignore in this folder already ignores *.conf.
+#
+#  The script can also write a profile for you: answer its questions once
+#  and save them when asked at the summary.
+#
+#  Not set here on purpose:
+#    VM ID           chosen each run (--vmid / --auto-vmid), to avoid clashes.
+#    Danger flags    --force-overwrite etc. are command line only.
+# =============================================================================
+
+# --- Ubuntu version ---
+# Codename of an Ubuntu cloud image, e.g. "noble" (24.04), "resolute" (26.04).
+# Blank = choose from a menu (needs a terminal: set it for --unattended).
+DISTRO_VER="resolute"
+
+# --- Storage ---
+# Proxmox storage for the disk. The disk format is picked from its type.
+# Blank = interactive runs ask; --unattended uses the host's only storage
+# that can hold VM disks (and stops if there are several).
+DISK_STOR=""
+
+# --- Template identity ---
+TEMPL_NAME_DEFAULT="ubuntu-resolute-cloud-template"   # blank = ubuntu-<DISTRO_VER>-cloud-template; --name overrides
+TAG="template"                    # Proxmox tags, separated by ';'
+VMID_DEFAULT="52000"              # suggested ID in interactive runs
+
+# --- VM hardware ---
+SOCKETS="1"                       # only asked on multi-NUMA hosts; NUMA on when > 1
+CORES="2"                         # per socket
+MEM="2048"                        # MB
+BALLOON="768"                     # MB minimum when ballooning; 0 = ballooning off
+BIOS="ovmf"                       # UEFI
+MACHINE="q35"
+CPU_TYPE="host"                   # host = fastest; kvm64 = live migration between different CPUs
+DISK_SIZE="15G"                   # whole GB, at least 4G
+OS_TYPE="l26"                     # Linux 2.6+ kernel
+NET_BRIDGE="vmbr0"                # must be a bridge on this host (checked before any work)
+VLAN=""                           # 1-4094; blank = untagged
+AGENT_ENABLE="1"                  # QEMU guest agent: 1 = on
+FSTRIM="1"                        # trim the disk after cloning: 1 = on
+
+# --- Display hardware ---
+TABLET=""                         # 1 / 0. Blank = 1 with DESKTOP=yes, else 0. Proxmox default = 1
+VGA=""                            # e.g. "virtio", "std", "serial0".
+                                  #   Blank = "virtio" with DESKTOP=yes, else Proxmox picks ("std")
+
+# --- Cloud-init login on each clone ---
+CLOUD_USER_DEFAULT="ubuntu"
+# Password for that user. Blank = a new random one each run, shown at the end.
+# Set it to reuse the same password every run, including --unattended.
+CLOUD_PASSWORD=""
+# SSH public key(s), one per line, or "github.com/<username>" to fetch your
+# GitHub keys each run. Blank = no key (you're asked in interactive runs).
+SSH_KEY=""
+# Upgrade all packages on a clone's first boot? 1 = yes, 0 = no.
+# Same as "Upgrade packages" in the Proxmox Cloud-Init tab.
+CI_UPGRADE="0"
+
+# --- Cloud-init snippet (vendor-data) ---
+# Storage with the "Snippets" content type for an optional first-boot file.
+# Blank = no snippet in unattended runs; interactive runs ask.
+SNIPPETS_STOR=""
+
+# --- Packages baked into the image (comma separated) ---
+VIRT_PKGS="qemu-guest-agent,cloud-init,cloud-utils,cloud-guest-utils"
+EXTRA_VIRT_PKGS=""                # your own, e.g. "curl,git,htop"; blank = none
+
+# --- Convert to a template at the end? ---
+# "yes" = always, "no" = never, blank = ask (--unattended: no).
+# --template / --no-template override this.
+CONVERT_TO_TEMPLATE=""
+
+# --- Locale, keyboard, time zone ---
+SET_X11="yes"                     # "no" = leave locale and keyboard as Ubuntu ships them
+LOCAL_LANG="en_GB.UTF-8"          # generated at build, selected on first boot
+X11_LAYOUT="gb"                   # keyboard, written at build (console + desktop)
+X11_MODEL="pc105"
+TZ="Europe/London"                # blank = leave the image's time zone (UTC)
+
+# =============================================================================
+#  Optional build features
+#  Each default matches what the stock Ubuntu cloud image already does
+#  ("OS default"), so leaving them alone gives the image as Ubuntu ships it.
+# =============================================================================
+
+# yes = uninstall snapd and pin it so apt never reinstalls it. no = leave it.
+# OS default = installed. Not allowed with DESKTOP=yes (Firefox is a snap).
+REMOVE_SNAPD="no"
+
+# yes = turn IPv6 off. no = leave it on. OS default = on.
+DISABLE_IPV6="no"
+
+# tuned profile to activate, e.g. "virtual-guest" (installs tuned).
+# Blank = no tuned. OS default = not installed.
+TUNED_PROFILE=""
+
+# Weekly fstrim timer. yes = on, no = off. OS default = on.
+ENABLE_FSTRIM_TIMER="yes"
+
+# Daily unattended security upgrades. yes = on, no = off. OS default = on.
+# Which repos get upgraded is left as Ubuntu ships it; to change that, add
+# your own file with UPLOAD_FILES (e.g. /etc/apt/apt.conf.d/51unattended-upgrades).
+UNATTENDED_UPGRADES="yes"
+UU_AUTOCLEAN_DAYS=""              # days between clearing old .deb downloads; blank = never (OS default)
+UU_AUTO_REBOOT="false"            # true = reboot by itself when an upgrade needs it. OS default = false
+UU_REBOOT_TIME="06:00"            # HH:MM or "now"; only used with UU_AUTO_REBOOT="true"
+
+# GNOME desktop: login screen at boot, no sleep/suspend, no first-login wizard.
+# yes = desktop, no = server. Give it more MEM/BALLOON/DISK_SIZE (e.g. 4096/2048/40G).
+DESKTOP="no"
+DESKTOP_PKGS="ubuntu-desktop-minimal,gnome-remote-desktop,openssl"
+
+# GNOME Remote Login over RDP (needs DESKTOP=yes). Each clone makes its own
+# TLS certificate and random password on first boot: /root/rdp-credentials.txt
+DESKTOP_RDP="no"
+DESKTOP_RDP_USER="rdp"
+
+# Grow the image to DISK_SIZE before installing, so big installs fit (the
+# stock image has only about 1-2 GB free). yes / no.
+# Blank = yes with DESKTOP=yes, else no.
+GROW_IMAGE_FIRST=""
+
+# =============================================================================
+#  Hooks: your own changes, without editing the script
+#  Run in this order, after everything above. Relative paths are looked up
+#  next to this profile. Empty () = nothing to do.
+# =============================================================================
+
+# Files to copy into the image: "local_path:/guest/path". Folders are created.
+UPLOAD_FILES=(
+    # "files/51unattended-upgrades:/etc/apt/apt.conf.d/51unattended-upgrades"
+)
+
+# Scripts run inside the image while it's built. Their #! line is honoured.
+CUSTOMIZE_SCRIPTS=(
+    # "scripts/add-admin-user.sh"
+)
+
+# Scripts run once, on each clone's first boot.
+FIRSTBOOT_SCRIPTS=(
+    # "scripts/first-boot.sh"
+)
+
+# Extra raw virt-customize arguments.
+EXTRA_VC_ARGS=(
+    # --memsize 4096
+)

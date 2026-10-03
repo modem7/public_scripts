@@ -9,7 +9,7 @@
 #            Provided as-is, with no warranty. Full text:
 #            https://github.com/modem7/public_scripts/blob/master/LICENSE
 #  Repo:     https://github.com/modem7/public_scripts
-#  Latest:   https://github.com/modem7/public_scripts/blob/master/Bash/Proxmox%20Scripts/create-ubuntu-cloud-template.sh
+#  Latest:   https://github.com/modem7/public_scripts/blob/master/Bash/Proxmox%20Scripts/Ubuntu%20Cloud%20Template/create-ubuntu-cloud-template.sh
 #  Issues:   https://github.com/modem7/public_scripts/issues
 #  Support:  https://www.buymeacoffee.com/modem7
 #
