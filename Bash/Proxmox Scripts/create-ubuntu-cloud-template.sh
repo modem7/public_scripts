@@ -95,7 +95,7 @@ _pw="$(head -c 48 /dev/urandom | base64 -w0 | tr -dc 'A-Za-z0-9')"
 CLOUD_PASSWORD_DEFAULT="${_pw:0:16}"
 unset _pw
 
-# --- Locale / keyboard (applied on first boot) ---
+# --- Locale / keyboard (locale applied on first boot, keyboard at build) ---
 LOCAL_LANG="en_GB.UTF-8"
 SET_X11="yes"            # "no" skips both locale and keymap
 X11_LAYOUT="gb"
@@ -1672,6 +1672,8 @@ validate_features() {
     # Values that end up in commands run inside the image: keep them plain.
     if _is_yes "$SET_X11"; then
         [[ "$LOCAL_LANG" =~ ^[A-Za-z0-9_.@-]+$ ]] || die "Invalid LOCAL_LANG '$LOCAL_LANG' in config."
+        [[ "$X11_LAYOUT" =~ ^[A-Za-z0-9_,+-]+$ ]] || die "Invalid X11_LAYOUT '$X11_LAYOUT' in config."
+        [[ "$X11_MODEL"  =~ ^[A-Za-z0-9_,+-]+$ ]] || die "Invalid X11_MODEL '$X11_MODEL' in config."
     fi
     [[ -z "$TUNED_PROFILE" || "$TUNED_PROFILE" =~ ^[A-Za-z0-9_.-]+$ ]] \
         || die "Invalid TUNED_PROFILE '$TUNED_PROFILE' in config."
@@ -1925,10 +1927,12 @@ EOF
         # The locale must exist before localectl can select it.
         vc_args+=(--run-command "locale-gen ${LOCAL_LANG}")
         # First boot, because localectl needs a running system.
-        vc_args+=(
-            --firstboot-command "localectl set-locale LANG=${LOCAL_LANG}"
-            --firstboot-command "localectl set-x11-keymap ${X11_LAYOUT} ${X11_MODEL}"
-        )
+        vc_args+=(--firstboot-command "localectl set-locale LANG=${LOCAL_LANG}")
+        # Keyboard: written now, straight into /etc/default/keyboard (what
+        # Ubuntu reads for both the console and X11). Not 'localectl
+        # set-x11-keymap' on first boot: on 26.04 systemd-localed can't save
+        # it ("Read-only file system"), so the layout was lost on reboot.
+        vc_args+=(--run-command "sed -i -e 's/^XKBLAYOUT=.*/XKBLAYOUT=\"${X11_LAYOUT}\"/' -e 's/^XKBMODEL=.*/XKBMODEL=\"${X11_MODEL}\"/' /etc/default/keyboard")
     fi
 
     _is_yes "$DISABLE_IPV6" \
