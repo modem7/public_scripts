@@ -384,6 +384,8 @@ AUTOMATION
                       The password is generated and shown at the end,
                       unless the profile sets CLOUD_PASSWORD.
                       Snippets are only used if SNIPPETS_STOR is in the profile.
+                      No DISK_STOR in the profile: the host's only VM-disk
+                      storage is used (stops if there are several).
 
 DANGER ZONE (deletes data)
   --force-overwrite   Destroy an existing template with the same ID, then rebuild.
@@ -750,6 +752,20 @@ select_storage() {
             && die "Configured storage '$DISK_STOR' is missing, inactive or cannot hold VM disks."
         warn "Configured storage '$DISK_STOR' is missing, inactive or cannot hold VM disks."
         warn "Choose another below."
+    fi
+
+    # Unattended with no storage in the profile: use the only one there is.
+    # (A standard install has one: local-lvm or local-zfs.) With several,
+    # stop rather than guess.
+    if [[ "$UNATTENDED" == "yes" ]]; then
+        if [[ ${#storages[@]} -eq 1 ]]; then
+            DISK_STOR="${storages[0]}"
+            _resolve_storage_type "${types[0]}"
+            success "Only one storage can hold VM disks, using it: $DISK_STOR ($STORAGE_TYPE / ${STORAGE_FORMAT:-auto})"
+            return
+        fi
+        die "DISK_STOR is not set in the profile, and this host has ${#storages[@]} storages that can hold VM disks: ${storages[*]}
+  Add one to the profile, e.g.  DISK_STOR=\"${storages[0]}\""
     fi
 
     local default_num=1 idx
@@ -2276,6 +2292,8 @@ DISTRO_VER=$(_conf_val "$DISTRO_VER")
 
 # --- Storage ---
 # Disk format is detected from the storage type at runtime.
+# Blank: interactive runs ask; --unattended uses the host's only VM-disk
+# storage (and stops if there are several).
 DISK_STOR=$(_conf_val "$DISK_STOR")
 
 # --- VM hardware ---
