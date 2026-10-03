@@ -66,7 +66,7 @@ hr() { echo; echo "== $* =="; }
 SCRIPT_URL="https://raw.githubusercontent.com/modem7/public_scripts/master/Bash/Server%20scripts/zram-to-zswap.sh"
 revert_hint() {
   if [[ -f "$0" && "$0" != "bash" && "$0" != "-bash" && "$0" != "sh" ]]; then
-    echo "sudo $0 --revert --apply"
+    echo "sudo $(printf '%q' "$0") --revert --apply"
   else
     echo "curl -s '$SCRIPT_URL' | sudo bash -s -- --revert --apply"
   fi
@@ -125,7 +125,11 @@ if [[ "$MODE" == "revert" ]]; then
 
   if [[ -f "$BACKUP_DIR/cmdline-path" ]]; then
     CMDLINE_FILE_RESTORE=$(cat "$BACKUP_DIR/cmdline-path")
-    cp -a "$BACKUP_DIR/cmdline.bak" "$CMDLINE_FILE_RESTORE"
+    if [[ -f "$BACKUP_DIR/cmdline.absent" ]]; then
+      rm -f "$CMDLINE_FILE_RESTORE"
+    else
+      cp -a "$BACKUP_DIR/cmdline.bak" "$CMDLINE_FILE_RESTORE"
+    fi
     if [[ "$CMDLINE_FILE_RESTORE" == "/etc/kernel/cmdline" ]]; then
       proxmox-boot-tool refresh
     else
@@ -183,7 +187,10 @@ if command -v proxmox-boot-tool >/dev/null 2>&1 && [[ -f /etc/kernel/cmdline ]];
   CMDLINE_FILE="/etc/kernel/cmdline"
   REFRESH_CMD="proxmox-boot-tool refresh"
 elif [[ -f /etc/default/grub ]]; then
-  CMDLINE_FILE="/etc/default/grub"
+  # A drop-in, not /etc/default/grub itself: files in grub.d are read after
+  # it, and cloud images ship 50-cloudimg-settings.cfg, which overrides
+  # GRUB_CMDLINE_LINUX_DEFAULT. "99-" makes ours the last word.
+  CMDLINE_FILE="/etc/default/grub.d/99-zswap.cfg"
   REFRESH_CMD="update-grub"
 else
   CMDLINE_FILE=""
@@ -231,7 +238,12 @@ if $APPLY; then
   mkdir -p "$BACKUP_DIR"
   cp -a /etc/fstab "$BACKUP_DIR/fstab.bak"
   if [[ -n "$CMDLINE_FILE" ]]; then
-    cp -a "$CMDLINE_FILE" "$BACKUP_DIR/cmdline.bak"
+    if [[ -e "$CMDLINE_FILE" ]]; then
+      cp -a "$CMDLINE_FILE" "$BACKUP_DIR/cmdline.bak"
+    else
+      # The GRUB drop-in is new: revert deletes it rather than restoring it.
+      touch "$BACKUP_DIR/cmdline.absent"
+    fi
     echo "$CMDLINE_FILE" > "$BACKUP_DIR/cmdline-path"
   fi
   if [[ -e /usr/bin/init-zram-swapping ]]; then
@@ -363,22 +375,51 @@ fi
 
 ### Step 4: persist across reboots via kernel cmdline ###
 hr "Persisting zswap via kernel cmdline"
-CMDLINE_PARAMS="zswap.enabled=1 zswap.compressor=${ZSWAP_COMPRESSOR} zswap.zpool=zsmalloc zswap.max_pool_percent=${ZSWAP_POOL_PERCENT}"
+# Newer kernels only have zsmalloc and no zpool parameter at all.
+ZPOOL_PARAM=""
+[[ -e /sys/module/zswap/parameters/zpool ]] && ZPOOL_PARAM=" zswap.zpool=zsmalloc"
+CMDLINE_PARAMS="zswap.enabled=1 zswap.compressor=${ZSWAP_COMPRESSOR}${ZPOOL_PARAM} zswap.max_pool_percent=${ZSWAP_POOL_PERCENT}"
+
+# What GRUB will actually use: /etc/default/grub, then every grub.d/*.cfg
+# in order (the same way update-grub reads them).
+grub_effective_cmdline() {
+  (
+    set +u
+    # shellcheck disable=SC1091
+    . /etc/default/grub
+    for f in /etc/default/grub.d/*.cfg; do
+      # shellcheck disable=SC1090
+      [[ -f "$f" ]] && . "$f"
+    done
+    echo "${GRUB_CMDLINE_LINUX_DEFAULT:-}"
+  )
+}
 
 if [[ -z "$CMDLINE_FILE" ]]; then
   echo "  Could not detect proxmox-boot-tool or GRUB — set these manually:"
   echo "  $CMDLINE_PARAMS"
-elif grep -q 'zswap.enabled' "$CMDLINE_FILE"; then
+elif [[ "$CMDLINE_FILE" == "/etc/kernel/cmdline" ]] && grep -q 'zswap.enabled' "$CMDLINE_FILE"; then
   echo "  $CMDLINE_FILE already has zswap params, leaving as-is"
+elif [[ "$CMDLINE_FILE" != "/etc/kernel/cmdline" ]] && grub_effective_cmdline | grep -q 'zswap.enabled'; then
+  echo "  GRUB config already has zswap params, leaving as-is"
 elif $APPLY; then
   if [[ "$CMDLINE_FILE" == "/etc/kernel/cmdline" ]]; then
     sed -i "s/\$/ ${CMDLINE_PARAMS}/" "$CMDLINE_FILE"
   else
-    sed -i "s/GRUB_CMDLINE_LINUX_DEFAULT=\"\(.*\)\"/GRUB_CMDLINE_LINUX_DEFAULT=\"\1 ${CMDLINE_PARAMS}\"/" "$CMDLINE_FILE"
+    if grep -q 'zswap.enabled' /etc/default/grub; then
+      echo "  /etc/default/grub has zswap params, but a file in /etc/default/grub.d"
+      echo "  overrides them (common on cloud images). Adding $CMDLINE_FILE."
+    fi
+    mkdir -p "$(dirname "$CMDLINE_FILE")"
+    cat > "$CMDLINE_FILE" <<EOF
+# Added by zram-to-zswap.sh. Read after the other grub.d files, so a
+# cloud image's own settings can't drop these. Undo: --revert --apply.
+GRUB_CMDLINE_LINUX_DEFAULT="\$GRUB_CMDLINE_LINUX_DEFAULT ${CMDLINE_PARAMS}"
+EOF
   fi
   $REFRESH_CMD
 else
-  echo "  [dry-run] would append to $CMDLINE_FILE and run: $REFRESH_CMD"
+  echo "  [dry-run] would add the params to $CMDLINE_FILE and run: $REFRESH_CMD"
   echo "    $CMDLINE_PARAMS"
 fi
 
