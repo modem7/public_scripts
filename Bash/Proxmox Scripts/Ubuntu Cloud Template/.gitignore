@@ -1,0 +1,3 @@
+# Your profiles can hold passwords and SSH keys: never commit them.
+# The example (profile.conf.example) is not ignored.
+*.conf
