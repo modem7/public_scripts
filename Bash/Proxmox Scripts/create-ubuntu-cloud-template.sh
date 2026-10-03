@@ -22,6 +22,17 @@
 #    3. Creates the VM, attaches the disk + cloud-init drive.
 #    4. Optionally converts it to a template.
 #
+#    All changes are made offline with virt-customize, so the image never
+#    has to be booted before it becomes a template.
+#
+#  OPTIONAL FEATURES (profile only, all off by default)
+#    Set these in a .conf profile. See "OPTIONAL BUILD FEATURES" below.
+#    REMOVE_SNAPD, DISABLE_IPV6, TUNED_PROFILE, ENABLE_FSTRIM_TIMER,
+#    UNATTENDED_UPGRADES, DESKTOP, DESKTOP_RDP, TABLET, VGA, GROW_IMAGE_FIRST
+#
+#    Hooks, to add your own changes without editing this script:
+#    UPLOAD_FILES, CUSTOMIZE_SCRIPTS, FIRSTBOOT_SCRIPTS, EXTRA_VC_ARGS
+#
 #  REQUIREMENTS
 #    - Run as root on a Proxmox VE host.
 #    - Internet access (cloud-images.ubuntu.com, optionally github.com).
@@ -131,6 +142,68 @@ SSH_KEY=""
 # --- Proxmox tags (semicolon separated) ---
 TAG="template"
 
+# =============================================================================
+#  OPTIONAL BUILD FEATURES
+#  Profile only: there are no prompts for these. All are off by default,
+#  so profiles that don't set them build exactly as before.
+#  Everything is applied offline by virt-customize.
+# =============================================================================
+
+# Uninstall snapd and pin it so apt never installs it again.
+# Not allowed with DESKTOP=yes (Firefox and the App Center need snaps).
+REMOVE_SNAPD="no"
+
+# Turn IPv6 off with a sysctl drop-in.
+DISABLE_IPV6="no"
+
+# tuned profile to activate, e.g. "virtual-guest". Blank = skip.
+# Installs tuned if it isn't already in the package list.
+TUNED_PROFILE=""
+
+# Enable the weekly fstrim timer inside the guest.
+ENABLE_FSTRIM_TIMER="no"
+
+# Daily unattended upgrades. Only the schedule and reboot settings are
+# written here. Add your own origins list with UPLOAD_FILES, e.g. to
+# /etc/apt/apt.conf.d/51unattended-upgrades.
+UNATTENDED_UPGRADES="no"
+UU_AUTO_REBOOT="false"   # "true" = reboot when an upgrade needs it
+UU_REBOOT_TIME="06:00"   # HH:MM, or "now"
+
+# GNOME desktop: installs DESKTOP_PKGS, boots to the login screen,
+# disables sleep/suspend and skips GNOME's first-login wizard.
+# Give it more MEM, BALLOON and DISK_SIZE in the profile too
+# (e.g. 4096 / 2048 / 40G).
+DESKTOP="no"
+DESKTOP_PKGS="ubuntu-desktop-minimal,gnome-remote-desktop,openssl"
+
+# GNOME Remote Login over RDP (needs DESKTOP=yes). Each clone makes its
+# own TLS certificate and a random password on first boot, and writes
+# the login to /root/rdp-credentials.txt.
+DESKTOP_RDP="no"
+DESKTOP_RDP_USER="rdp"
+
+# Grow the image to DISK_SIZE before customising, so large installs fit.
+# The stock image has about 1-2 GB free. Blank = yes with DESKTOP=yes.
+GROW_IMAGE_FIRST=""
+
+# VM display hardware.
+TABLET=""                # tablet pointer: blank = 0 (1 with DESKTOP=yes)
+VGA=""                   # e.g. "virtio": blank = Proxmox default (virtio with DESKTOP=yes)
+
+# --- Hooks ---
+# Run in this order, after the built-in steps above. Relative paths are
+# looked up next to the profile.
+#   UPLOAD_FILES       "local_path:guest_path" pairs (parent dirs are created).
+#   CUSTOMIZE_SCRIPTS  scripts run inside the image at build time. The #! line
+#                      is honoured; with none, /bin/sh runs it.
+#   FIRSTBOOT_SCRIPTS  scripts run once, on each clone's first boot (--firstboot).
+#   EXTRA_VC_ARGS      raw virt-customize arguments, e.g. (--memsize 4096).
+UPLOAD_FILES=()
+CUSTOMIZE_SCRIPTS=()
+FIRSTBOOT_SCRIPTS=()
+EXTRA_VC_ARGS=()
+
 # --- Host packages the script needs ---
 #   libguestfs-tools  virt-customize (edits the image offline)
 #   wget              downloads
@@ -225,6 +298,15 @@ _conf_val() {
     s="${s//\$/\\\$}"
     s="${s//\`/\\\`}"
     printf '"%s"' "$s"
+}
+
+# Same, for a whole array: prints ( "a" "b" ).
+# Usage: _conf_arr <array name>
+_conf_arr() {
+    local -n _arr="$1"
+    local v out="("
+    for v in "${_arr[@]}"; do out+=" $(_conf_val "$v")"; done
+    printf '%s )' "$out"
 }
 
 # =============================================================================
@@ -336,6 +418,10 @@ if [[ -n "$CONFIG_FILE" ]]; then
     IFS='|' read -r UNATTENDED AUTO_VMID FORCE_OVERWRITE I_KNOW VMID_FLAG CONFIG_FILE <<< "$_safe_flags"
     unset _safe_flags
 fi
+
+# Relative hook paths in a profile are looked up next to that profile.
+CONFIG_DIR="$SCRIPT_DIR"
+[[ -n "$CONFIG_FILE" ]] && CONFIG_DIR="$(cd "$(dirname "$CONFIG_FILE")" && pwd)"
 
 # --- Flag sanity checks ---
 [[ "$UNATTENDED" == "yes" && -z "$CONFIG_FILE" ]] \
@@ -1478,10 +1564,220 @@ _make_working_copy() {
 }
 
 # =============================================================================
+#  OPTIONAL FEATURES: checks
+#  Run before the summary, so a bad profile stops before any work starts.
+# =============================================================================
+_is_yes() { [[ "${1:-}" == "yes" ]]; }
+
+# A feature flag must be "yes" or "no" (blank counts as "no").
+_check_yes_no() {
+    local name="$1"
+    [[ "${!name:-no}" =~ ^(yes|no)$ ]] || die "Invalid $name '${!name}' in config. Use yes or no."
+}
+
+# Turn a hook path into an absolute one (relative = next to the profile)
+# and check the file exists. Usage: _hook_path <path> <setting name>
+_hook_path() {
+    local p="$1"
+    [[ "$p" != /* ]] && p="$CONFIG_DIR/$p"
+    [[ -f "$p" ]] || die "$2: file not found: $p"
+    HOOK_PATH="$p"
+}
+
+validate_features() {
+    local f
+    for f in REMOVE_SNAPD DISABLE_IPV6 ENABLE_FSTRIM_TIMER UNATTENDED_UPGRADES \
+             DESKTOP DESKTOP_RDP GROW_IMAGE_FIRST SET_X11; do
+        _check_yes_no "$f"
+    done
+
+    # Values that end up in commands run inside the image: keep them plain.
+    if _is_yes "$SET_X11"; then
+        [[ "$LOCAL_LANG" =~ ^[A-Za-z0-9_.@-]+$ ]] || die "Invalid LOCAL_LANG '$LOCAL_LANG' in config."
+    fi
+    [[ -z "$TUNED_PROFILE" || "$TUNED_PROFILE" =~ ^[A-Za-z0-9_.-]+$ ]] \
+        || die "Invalid TUNED_PROFILE '$TUNED_PROFILE' in config."
+    [[ "$UU_AUTO_REBOOT" =~ ^(true|false)$ ]] \
+        || die "Invalid UU_AUTO_REBOOT '$UU_AUTO_REBOOT' in config. Use true or false."
+    [[ "$UU_REBOOT_TIME" =~ ^(now|([01][0-9]|2[0-3]):[0-5][0-9])$ ]] \
+        || die "Invalid UU_REBOOT_TIME '$UU_REBOOT_TIME' in config. Use HH:MM or now."
+    [[ "$DESKTOP_RDP_USER" =~ ^[a-z_][a-z0-9_-]*$ ]] \
+        || die "Invalid DESKTOP_RDP_USER '$DESKTOP_RDP_USER' in config."
+    [[ -z "$TABLET" || "$TABLET" =~ ^[01]$ ]] || die "Invalid TABLET '$TABLET' in config. Use 0 or 1."
+    [[ -z "$VGA" || "$VGA" =~ ^[a-z0-9]+(,[a-z0-9=]+)*$ ]] || die "Invalid VGA '$VGA' in config."
+
+    if _is_yes "$DESKTOP" && _is_yes "$REMOVE_SNAPD"; then
+        die "REMOVE_SNAPD=yes and DESKTOP=yes don't mix: the desktop needs snapd (Firefox, App Center)."
+    fi
+    if _is_yes "$DESKTOP_RDP" && ! _is_yes "$DESKTOP"; then
+        die "DESKTOP_RDP=yes needs DESKTOP=yes."
+    fi
+
+    # Hooks: resolve paths now, so a typo fails before the download.
+    local i entry
+    for i in "${!UPLOAD_FILES[@]}"; do
+        entry="${UPLOAD_FILES[$i]}"
+        [[ "$entry" == *:/* ]] || die "UPLOAD_FILES entry '$entry' must be 'local_path:/guest/path'."
+        _hook_path "${entry%%:*}" UPLOAD_FILES
+        UPLOAD_FILES[i]="${HOOK_PATH}:${entry#*:}"
+    done
+    for i in "${!CUSTOMIZE_SCRIPTS[@]}"; do
+        _hook_path "${CUSTOMIZE_SCRIPTS[$i]}" CUSTOMIZE_SCRIPTS
+        CUSTOMIZE_SCRIPTS[i]="$HOOK_PATH"
+    done
+    for i in "${!FIRSTBOOT_SCRIPTS[@]}"; do
+        _hook_path "${FIRSTBOOT_SCRIPTS[$i]}" FIRSTBOOT_SCRIPTS
+        FIRSTBOOT_SCRIPTS[i]="$HOOK_PATH"
+    done
+}
+
+# Desktop changes some hardware defaults, unless the profile sets them.
+# Usage: _eff <profile value> <default with DESKTOP=yes> <default otherwise>
+_eff() {
+    if [[ -n "$1" ]]; then echo "$1"
+    elif _is_yes "$DESKTOP"; then echo "$2"
+    else echo "$3"
+    fi
+}
+_eff_tablet() { _eff "$TABLET" 1 0; }
+_eff_vga()    { _eff "$VGA" virtio ""; }
+_eff_grow()   { _eff "$GROW_IMAGE_FIRST" yes no; }
+
+# One line listing what's switched on. Used in the summary and VM notes.
+_features_summary() {
+    local -a on=()
+    _is_yes "$REMOVE_SNAPD"        && on+=("no snapd")
+    _is_yes "$DISABLE_IPV6"        && on+=("IPv6 off")
+    [[ -n "$TUNED_PROFILE" ]]      && on+=("tuned: $TUNED_PROFILE")
+    _is_yes "$ENABLE_FSTRIM_TIMER" && on+=("fstrim timer")
+    if _is_yes "$UNATTENDED_UPGRADES"; then
+        [[ "$UU_AUTO_REBOOT" == "true" ]] \
+            && on+=("unattended upgrades (reboot at $UU_REBOOT_TIME)") \
+            || on+=("unattended upgrades (no auto reboot)")
+    fi
+    _is_yes "$DESKTOP"             && on+=("GNOME desktop")
+    _is_yes "$DESKTOP_RDP"         && on+=("RDP")
+    local hooks=$(( ${#UPLOAD_FILES[@]} + ${#CUSTOMIZE_SCRIPTS[@]} + ${#FIRSTBOOT_SCRIPTS[@]} ))
+    (( hooks > 0 ))                && on+=("$hooks hook(s)")
+    (( ${#on[@]} > 0 )) || { echo "(none)"; return; }
+    local out
+    printf -v out '%s, ' "${on[@]}"
+    echo "${out%, }"
+}
+
+# =============================================================================
+#  OPTIONAL FEATURES: files written into the image
+# =============================================================================
+
+# Grows the root partition and filesystem to fill the (already enlarged)
+# disk. Runs inside the image. Exit code 1 from growpart = already full size.
+# shellcheck disable=SC2016  # expands inside the image, not here
+_GROW_CMD='root=$(findmnt -no SOURCE /)
+part=${root##*[!0-9]}
+disk=${root%"$part"}
+disk=${disk%p}
+growpart "$disk" "$part" || [ $? -eq 1 ]
+resize2fs "$root"'
+
+_SNAPD_PIN='# Managed by create-ubuntu-cloud-template.sh (REMOVE_SNAPD=yes)
+Package: snapd
+Pin: release a=*
+Pin-Priority: -10
+'
+
+_IPV6_SYSCTL='# Managed by create-ubuntu-cloud-template.sh (DISABLE_IPV6=yes)
+net.ipv6.conf.all.disable_ipv6 = 1
+net.ipv6.conf.default.disable_ipv6 = 1
+'
+
+_UU_PERIODIC='// Managed by create-ubuntu-cloud-template.sh (UNATTENDED_UPGRADES=yes)
+APT::Periodic::Update-Package-Lists "1";
+APT::Periodic::Unattended-Upgrade "1";
+APT::Periodic::AutocleanInterval "7";
+'
+
+_uu_reboot_conf() {
+    cat <<EOF
+// Managed by ${SCRIPT_NAME} (UNATTENDED_UPGRADES=yes)
+Unattended-Upgrade::Automatic-Reboot "${UU_AUTO_REBOOT}";
+Unattended-Upgrade::Automatic-Reboot-Time "${UU_REBOOT_TIME}";
+EOF
+}
+
+# Per-clone RDP setup. Runs every boot, but only does anything when the
+# machine-id has changed, i.e. on the first boot of a new clone.
+_grd_instance_script() {
+    cat <<EOF
+#!/bin/bash
+# Managed by ${SCRIPT_NAME} (DESKTOP_RDP=yes)
+# Sets up GNOME Remote Login (RDP) once per clone, so clones never share
+# a TLS key or password. The login is written to /root/rdp-credentials.txt.
+set -euo pipefail
+
+rdp_user="${DESKTOP_RDP_USER}"
+EOF
+    cat <<'EOF'
+state=/var/lib/grd-instance/machine-id
+id="$(cat /etc/machine-id)"
+[[ -f "$state" && "$(cat "$state")" == "$id" ]] && exit 0
+
+grd_home="$(getent passwd gnome-remote-desktop | cut -d: -f6)"
+[[ -n "$grd_home" ]] || { echo "user gnome-remote-desktop not found" >&2; exit 1; }
+host="$(hostname -f 2>/dev/null || hostname)"
+
+# The daemon runs as gnome-remote-desktop, so it must own the key.
+runuser -u gnome-remote-desktop -- openssl req -x509 -newkey rsa:4096 -sha256 \
+    -days 3650 -nodes -subj "/CN=${host}" \
+    -keyout "$grd_home/rdp-tls.key" -out "$grd_home/rdp-tls.crt" 2>/dev/null
+
+pass="$(openssl rand -base64 48 | tr -dc 'A-Za-z0-9')"
+pass="${pass:0:20}"
+
+grdctl --system rdp set-tls-key  "$grd_home/rdp-tls.key"
+grdctl --system rdp set-tls-cert "$grd_home/rdp-tls.crt"
+grdctl --system rdp set-credentials "$rdp_user" "$pass"
+grdctl --system rdp enable
+
+( umask 077
+  printf 'RDP host:     %s:3389\nRDP user:     %s\nRDP password: %s\n' "$host" "$rdp_user" "$pass" \
+      > /root/rdp-credentials.txt )
+
+systemctl enable gnome-remote-desktop.service
+systemctl start --no-block gnome-remote-desktop.service
+
+mkdir -p "$(dirname "$state")"
+echo "$id" > "$state"
+EOF
+}
+
+# Only After=network-online.target: ordering after cloud-init.target
+# makes a cycle with multi-user.target.
+_GRD_INSTANCE_UNIT='# Managed by create-ubuntu-cloud-template.sh (DESKTOP_RDP=yes)
+[Unit]
+Description=Per-clone GNOME Remote Login setup (TLS key, RDP password)
+Wants=network-online.target
+After=network-online.target
+ConditionPathExists=/usr/bin/grdctl
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/grd-instance
+
+[Install]
+WantedBy=multi-user.target
+'
+
+# =============================================================================
 #  IMAGE CUSTOMISATION
 #  One virt-customize call. Each call boots a small helper VM,
 #  so doing everything at once saves time.
+#  virt-customize applies the options in command-line order:
+#    1. grow (optional), update, packages, built-in settings
+#    2. hooks: uploads, customise scripts, first-boot scripts, extra args
+#    3. apt-get clean, then blank the machine-id (always last)
 # =============================================================================
+IMAGE_GROWN="no"
+
 customize_image() {
     header "Image Customisation"
     local image_path="$WORK_DIR/$DISK_IMAGE"
@@ -1496,26 +1792,124 @@ EOF
 
     # Strip spaces: older profiles saved lists like "curl, git".
     local all_pkgs="$VIRT_PKGS${EXTRA_VIRT_PKGS:+,$EXTRA_VIRT_PKGS}"
+    _is_yes "$DESKTOP"             && all_pkgs+=",$DESKTOP_PKGS"
+    [[ -n "$TUNED_PROFILE" ]]      && all_pkgs+=",tuned"
+    _is_yes "$UNATTENDED_UPGRADES" && all_pkgs+=",unattended-upgrades"
     all_pkgs="${all_pkgs//[[:space:]]/}"
-    local vc_args=(
-        -a "$image_path"
-        --update
+    # Drop duplicates, keep the order.
+    all_pkgs="$(tr ',' '\n' <<< "$all_pkgs" | awk 'NF && !seen[$0]++' | paste -sd,)"
+
+    local vc_args=(-a "$image_path")
+
+    # Room for big installs (e.g. a desktop). Must come before the installs.
+    if _is_yes "$(_eff_grow)"; then
+        local cur_bytes new_bytes
+        cur_bytes="$(qemu-img info --output=json "$image_path" | awk -F'[:,]' '/"virtual-size"/ {gsub(/ /,"",$2); print $2; exit}')"
+        new_bytes="$(numfmt --from=iec "$DISK_SIZE")"
+        if (( new_bytes > cur_bytes )); then
+            info "Growing the image to $DISK_SIZE before customising..."
+            qemu-img resize -q "$image_path" "$DISK_SIZE"
+            vc_args+=(--run-command "$_GROW_CMD")
+            IMAGE_GROWN="yes"
+        else
+            warn "DISK_SIZE ($DISK_SIZE) is not bigger than the image. Not growing it first."
+        fi
+    fi
+
+    vc_args+=(--update)
+
+    # Before the installs, so nothing can pull snapd back in.
+    if _is_yes "$REMOVE_SNAPD"; then
+        vc_args+=(
+            --uninstall snapd
+            --write "/etc/apt/preferences.d/no-snapd.pref:${_SNAPD_PIN}"
+        )
+    fi
+
+    vc_args+=(
         --install "$all_pkgs"
         --upload "${ds_cfg}:/etc/cloud/cloud.cfg.d/99_pve.cfg"
-        # Installing packages can create a machine-id. Clones sharing one
-        # get the same DHCP lease, so blank it; systemd makes a new one on boot.
-        --run-command "truncate -s 0 /etc/machine-id"
     )
 
     [[ -n "${TZ:-}" ]] && vc_args+=(--timezone "$TZ")
 
-    # First boot, because localectl needs a running system.
     if [[ "${SET_X11:-}" == "yes" ]]; then
+        # The locale must exist before localectl can select it.
+        vc_args+=(--run-command "locale-gen ${LOCAL_LANG}")
+        # First boot, because localectl needs a running system.
         vc_args+=(
             --firstboot-command "localectl set-locale LANG=${LOCAL_LANG}"
             --firstboot-command "localectl set-x11-keymap ${X11_LAYOUT} ${X11_MODEL}"
         )
     fi
+
+    _is_yes "$DISABLE_IPV6" \
+        && vc_args+=(--write "/etc/sysctl.d/99-disable-ipv6.conf:${_IPV6_SYSCTL}")
+
+    # tuned-adm needs the daemon running, so write its state files directly.
+    if [[ -n "$TUNED_PROFILE" ]]; then
+        vc_args+=(
+            --run-command "for d in /usr/lib/tuned/profiles /usr/lib/tuned /etc/tuned/profiles /etc/tuned; do [ -d \"\$d/${TUNED_PROFILE}\" ] && exit 0; done; echo 'tuned profile not found: ${TUNED_PROFILE}' >&2; exit 1"
+            --write "/etc/tuned/active_profile:${TUNED_PROFILE}"$'\n'
+            --write "/etc/tuned/profile_mode:manual"$'\n'
+            --run-command "systemctl enable tuned.service"
+        )
+    fi
+
+    _is_yes "$ENABLE_FSTRIM_TIMER" && vc_args+=(--run-command "systemctl enable fstrim.timer")
+
+    if _is_yes "$UNATTENDED_UPGRADES"; then
+        vc_args+=(
+            --write "/etc/apt/apt.conf.d/20auto-upgrades:${_UU_PERIODIC}"
+            --write "/etc/apt/apt.conf.d/52unattended-reboot:$(_uu_reboot_conf)"$'\n'
+        )
+    fi
+
+    if _is_yes "$DESKTOP"; then
+        vc_args+=(
+            --run-command "systemctl set-default graphical.target"
+            --run-command "systemctl mask sleep.target suspend.target hibernate.target hybrid-sleep.target"
+            --mkdir /etc/skel/.config
+            --write "/etc/skel/.config/gnome-initial-setup-done:yes"$'\n'
+        )
+    fi
+
+    if _is_yes "$DESKTOP_RDP"; then
+        vc_args+=(
+            --write "/usr/local/sbin/grd-instance:$(_grd_instance_script)"$'\n'
+            --chmod "0755:/usr/local/sbin/grd-instance"
+            --write "/etc/systemd/system/grd-instance.service:${_GRD_INSTANCE_UNIT}"
+            --run-command "systemctl enable grd-instance.service"
+        )
+    fi
+
+    # --- Hooks ---
+    local entry
+    for entry in "${UPLOAD_FILES[@]}"; do
+        vc_args+=(--mkdir "$(dirname "${entry#*:}")" --upload "$entry")
+    done
+    # Not --run: that feeds the script to /bin/sh, ignoring its #! line.
+    # Uploading and executing it honours the #! (e.g. #!/bin/bash).
+    local i guest
+    for i in "${!CUSTOMIZE_SCRIPTS[@]}"; do
+        guest="/tmp/ctemplate-hook-${i}"
+        vc_args+=(
+            --upload "${CUSTOMIZE_SCRIPTS[$i]}:${guest}"
+            --chmod "0700:${guest}"
+            --run-command "${guest}"
+            --delete "${guest}"
+        )
+    done
+    for entry in "${FIRSTBOOT_SCRIPTS[@]}"; do vc_args+=(--firstboot "$entry"); done
+    vc_args+=("${EXTRA_VC_ARGS[@]}")
+
+    vc_args+=(
+        --run-command "apt-get clean"
+        # Installing packages can create a machine-id. Clones sharing one
+        # get the same DHCP lease, so blank it; systemd makes a new one on boot.
+        # Keep this last.
+        --run-command "truncate -s 0 /etc/machine-id"
+    )
 
     info "Running virt-customize (this can take a few minutes)..."
     virt-customize "${vc_args[@]}" || die "virt-customize failed."
@@ -1528,6 +1922,8 @@ EOF
 create_vm() {
     header "VM Creation"
     local net_opts="virtio,bridge=${NET_BRIDGE}${VLAN:+,tag=${VLAN}}"
+    local vga
+    vga="$(_eff_vga)"
 
     info "Creating VM $VMID ($TEMPL_NAME)..."
     qm create "$VMID" \
@@ -1545,12 +1941,13 @@ create_vm() {
         --net0       "$net_opts" \
         --tags       "$TAG" \
         --rng0       "source=/dev/urandom" \
-        --tablet     "0" \
+        --tablet     "$(_eff_tablet)" \
         --scsihw     "virtio-scsi-single" \
         --ipconfig0  "ip=dhcp" \
         --ciuser     "$CLOUD_USER" \
         --cipassword "$CLOUD_PASSWORD" \
-        --ciupgrade  "$CI_UPGRADE"
+        --ciupgrade  "$CI_UPGRADE" \
+        ${vga:+--vga "$vga"}
     # From here on, a failure removes this VM automatically.
     VMID_CREATED="$VMID"
 
@@ -1607,6 +2004,8 @@ _vm_description() {
 
 **Cloud-Init user:** ${CLOUD_USER}
 
+**Build features:** $(_features_summary)
+
 ---
 
 ### Notes
@@ -1618,6 +2017,9 @@ _vm_description() {
 
 ${upgrade_note}
 ${snippet_note}
+$(_is_yes "$DESKTOP_RDP" && echo "
+> **RDP:** each clone makes its own login on first boot.
+> Read it with: \`cat /root/rdp-credentials.txt\`")
 
 ---
 
@@ -1664,6 +2066,10 @@ apply_ssh_key() {
 # =============================================================================
 resize_disk() {
     header "Disk Resize"
+    if [[ "$IMAGE_GROWN" == "yes" ]]; then
+        success "Disk is already $DISK_SIZE (grown before customising)."
+        return
+    fi
     qm resize "$VMID" scsi0 "$DISK_SIZE"
     success "Disk resized to $DISK_SIZE."
 }
@@ -1846,6 +2252,28 @@ SET_X11=$(_conf_val "$SET_X11")
 X11_LAYOUT=$(_conf_val "$X11_LAYOUT")
 X11_MODEL=$(_conf_val "$X11_MODEL")
 TZ=$(_conf_val "$TZ")
+
+# --- Optional build features (no prompts; see the script header) ---
+REMOVE_SNAPD=$(_conf_val "$REMOVE_SNAPD")
+DISABLE_IPV6=$(_conf_val "$DISABLE_IPV6")
+TUNED_PROFILE=$(_conf_val "$TUNED_PROFILE")
+ENABLE_FSTRIM_TIMER=$(_conf_val "$ENABLE_FSTRIM_TIMER")
+UNATTENDED_UPGRADES=$(_conf_val "$UNATTENDED_UPGRADES")
+UU_AUTO_REBOOT=$(_conf_val "$UU_AUTO_REBOOT")
+UU_REBOOT_TIME=$(_conf_val "$UU_REBOOT_TIME")
+DESKTOP=$(_conf_val "$DESKTOP")
+DESKTOP_PKGS=$(_conf_val "$DESKTOP_PKGS")
+DESKTOP_RDP=$(_conf_val "$DESKTOP_RDP")
+DESKTOP_RDP_USER=$(_conf_val "$DESKTOP_RDP_USER")
+GROW_IMAGE_FIRST=$(_conf_val "$GROW_IMAGE_FIRST")
+TABLET=$(_conf_val "$TABLET")
+VGA=$(_conf_val "$VGA")
+
+# --- Hooks ---
+UPLOAD_FILES=$(_conf_arr UPLOAD_FILES)
+CUSTOMIZE_SCRIPTS=$(_conf_arr CUSTOMIZE_SCRIPTS)
+FIRSTBOOT_SCRIPTS=$(_conf_arr FIRSTBOOT_SCRIPTS)
+EXTRA_VC_ARGS=$(_conf_arr EXTRA_VC_ARGS)
 EOF
     )
     # umask only applies to new files; also fix profiles made by older versions.
@@ -1888,6 +2316,7 @@ print_summary() {
     _row "SSH key:"             "$ssh_display"
     _row "Extra packages:"      "${EXTRA_VIRT_PKGS:-(none)}"
     _row "Snippet:"             "$snippet_display"
+    _row "Build features:"      "$(_features_summary)"
     _row "Timezone:"            "$TZ"
     _row "Upgrade on 1st boot:" "$([[ "$CI_UPGRADE" == "1" ]] && echo Yes || echo No)"
     _row "Convert to template:" "$templ_str"
@@ -1924,6 +2353,7 @@ main() {
     select_storage
     get_valid_vmid
     user_prompts
+    validate_features
     print_summary
 
     # 2. Build the image
