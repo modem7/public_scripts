@@ -1,0 +1,145 @@
+# =============================================================================
+#  Example profile for create-lxc.sh
+#
+#  1. Copy it:   cp profile.conf.example my-lxc.conf
+#  2. Edit the copy. Apart from OS_TEMPLATE (which the script would ask for),
+#     every value below is the script's own default, so anything you leave
+#     alone behaves as if it weren't set.
+#  3. Build:     ./create-lxc.sh --config my-lxc.conf
+#     Unattended: add  --unattended --ctid 53000 --auto-ctid --template
+#
+#  Your copy can hold a mail password and SSH keys: keep it private
+#  (chmod 600) and out of git. The .gitignore in this folder already
+#  ignores *.conf.
+#
+#  Not set here on purpose:
+#    Container ID    chosen each run (--ctid / --auto-ctid), to avoid clashes.
+#    Danger flags    --force-overwrite etc. are command line only.
+# =============================================================================
+
+# --- Operating system ---
+# "<distro>-<version>" as Proxmox names its templates: "debian-13",
+# "debian-12", "ubuntu-24.04", ...  See them with:  pveam available --section system
+# Blank = choose from a menu (needs a terminal: set it for --unattended).
+OS_TEMPLATE="debian-13"
+
+# --- Storage ---
+# Proxmox storage for the container's disk.
+# Blank = interactive runs ask; --unattended uses the host's only storage
+# that can hold container disks (and stops if there are several).
+ROOTFS_STOR=""
+# Storage that keeps the downloaded template (content type "Container
+# template"). Blank = "local" if it can, else the first that can.
+TEMPLATE_STOR=""
+
+# --- Container identity ---
+CT_NAME=""                        # hostname. Blank = <distro>-<version>-lxc[-template]; --name overrides
+TAG="lxc"                         # Proxmox tags, separated by ';'
+CTID_DEFAULT="53000"              # suggested ID in interactive runs
+
+# --- Container resources ---
+CORES="1"
+MEM="1024"                        # MB
+SWAP="512"                        # MB; 0 = no swap
+DISK_SIZE="8G"                    # whole GB, at least 2G
+UNPRIVILEGED="1"                  # 1 = unprivileged (safer); 0 = privileged
+NESTING="1"                       # needed by systemd in current Ubuntu/Debian, and by Docker
+START_ON_BOOT="0"                 # 1 = start with the host. Ignored for templates
+
+# --- Network ---
+NET_BRIDGE="vmbr0"                # must be a bridge on this host (checked before any work)
+VLAN=""                           # 1-4094; blank = untagged
+IP="dhcp"                         # "dhcp", or static with prefix: "192.168.1.50/24"
+GATEWAY=""                        # needed with a static IP
+NAMESERVER=""                     # blank = same as the host
+SEARCHDOMAIN=""                   # blank = same as the host
+
+# --- Locale, time zone ---
+LOCAL_LANG="en_GB.UTF-8"
+TZ="Europe/London"                # "host" = same as the Proxmox host; blank = leave as shipped (UTC)
+
+# --- Packages (comma separated) ---
+BASE_PKGS="auto-apt-proxy,aptitude,curl,htop,plocate,needrestart,pwgen,sudo,unzip,wget"
+EXTRA_PKGS=""                     # your own, e.g. "git,python-is-python3"; blank = none
+APT_UPGRADE="yes"                 # yes = upgrade every package while building
+
+# --- Convert to a template at the end? ---
+# "yes" = always, "no" = never (leave a running container), blank = ask
+# (--unattended: no). --template / --no-template override this.
+CONVERT_TO_TEMPLATE=""
+
+# =============================================================================
+#  Optional features
+#  All off by default. No account ever gets a password: logins are by SSH
+#  key only, and root is always reachable from the host with 'pct enter'.
+# =============================================================================
+
+# --- Users ---
+# SSH public key(s) for root, one per line. Blank = no SSH login for root.
+ROOT_SSH_KEY=""
+
+# Service account for Ansible (system user, bash, passwordless sudo).
+# Blank = don't create it.
+ANSIBLE_USER=""                   # e.g. "ansible"
+ANSIBLE_SSH_KEY=""                # e.g. "ssh-ed25519 AAAA... ansible"
+
+# Your own login (member of 'sudo', passwordless sudo). Blank = don't create.
+ADMIN_USER=""                     # e.g. "alex"
+ADMIN_SSH_KEY=""
+
+# --- Shell ---
+# yes = install zsh + zsh-antigen, download DOTFILES_URLS into /etc/skel,
+#       give root and ADMIN_USER zsh. ANSIBLE_USER keeps bash.
+ZSH_DOTFILES="no"
+DOTFILES_URLS=(
+    # "https://raw.githubusercontent.com/<you>/dotfiles/master/.zshrc"
+    # "https://raw.githubusercontent.com/<you>/dotfiles/master/.zshenv"
+    # "https://raw.githubusercontent.com/<you>/dotfiles/master/.p10k.zsh"
+)
+
+# --- Mail ---
+# yes = Postfix as a send-only relay through an authenticated smarthost.
+#       Mail is sent as <hostname>@MAIL_DOMAIN (clones use their own name).
+POSTFIX_RELAY="no"
+POSTFIX_RELAYHOST="[smtp.gmail.com]:587"
+POSTFIX_USER=""                   # e.g. "you@gmail.com"
+POSTFIX_PASS=""                   # e.g. a Gmail app password. Use single quotes
+MAIL_DOMAIN=""                    # e.g. "example.com"
+
+# --- Automatic updates ---
+# yes = install unattended-upgrades and run it daily. The distro's own
+#       security origins stay as shipped; the settings below are added.
+UNATTENDED_UPGRADES="no"
+UU_INCLUDE_UPDATES="yes"          # yes = also <release>-updates, not only security
+UU_MAIL=""                        # report address (needs POSTFIX_RELAY or other mail); blank = none
+UU_AUTO_REBOOT="false"            # true = reboot by itself when an upgrade needs it
+UU_REBOOT_TIME="06:00"            # HH:MM or "now"; only used with UU_AUTO_REBOOT="true"
+# Extra repos to upgrade from. Single quotes, so ${distro_codename} reaches
+# apt untouched. Find the values with:  apt-cache policy
+UU_EXTRA_ORIGINS=(
+    # 'origin=Docker,archive=${distro_codename}'
+)
+
+# --- System tweaks ---
+REMOVE_SNAPD="no"                 # yes = uninstall snapd (if present) and pin it out
+DISABLE_IPV6="no"                 # yes = turn IPv6 off inside the container
+PIP_BREAK_SYSTEM_PACKAGES="no"    # yes = let pip install system-wide (/etc/pip.conf)
+SUDO_COREDUMP_FIX="no"            # yes = "Set disable_coredump false" in /etc/sudo.conf
+KEYCTL="0"                        # 1 = allow keyctl(); Docker in an unprivileged container needs it
+
+# =============================================================================
+#  Hooks: your own changes, without editing the script
+#  Relative paths are looked up next to this profile. Empty () = nothing.
+# =============================================================================
+
+# Files copied into the container BEFORE the setup runs: "local_path:/guest/path".
+# Folders are created. Anything put in /etc/skel reaches the users made above.
+UPLOAD_FILES=(
+    # "files/.wakatime.cfg:/etc/skel/.wakatime.cfg"
+)
+
+# Scripts run as root inside the container AFTER the setup, in this order.
+# Use them to install an app. Their #! line is honoured.
+PROVISION_SCRIPTS=(
+    # "scripts/install-olivetin.sh"
+)
