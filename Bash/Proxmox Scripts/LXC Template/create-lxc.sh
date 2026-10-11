@@ -24,8 +24,9 @@
 #    4. Either leaves it running, ready to use, or cleans it and converts
 #       it to a Proxmox template you can clone (--template).
 #
-#  OPTIONAL FEATURES (profile only)
-#    Set these in a .conf profile. See "OPTIONAL FEATURES" below.
+#  OPTIONAL FEATURES
+#    Asked about in interactive runs, or set in a .conf profile.
+#    See "OPTIONAL FEATURES" below.
 #    ANSIBLE_USER, ADMIN_USER, ROOT_SSH_KEY, ZSH_DOTFILES, POSTFIX_RELAY,
 #    UNATTENDED_UPGRADES (+ UU_*), REMOVE_SNAPD, DISABLE_IPV6,
 #    PIP_BREAK_SYSTEM_PACKAGES, SUDO_COREDUMP_FIX, KEYCTL.
@@ -47,7 +48,6 @@
 #    Re-run       ./create-lxc.sh --config <profile>.conf
 #
 #    By hand      cp profile.conf.example my-lxc.conf    (then edit it)
-#                 The optional features can only be set by editing a profile.
 #
 #    Automated    ./create-lxc.sh --config my-lxc.conf \
 #                     --unattended --ctid 53000 --auto-ctid --template
@@ -142,9 +142,10 @@ CONVERT_TO_TEMPLATE=""
 
 # =============================================================================
 #  OPTIONAL FEATURES
-#  Set these in a profile: there are no prompts for them. All default to
-#  off, so a profile that sets none of them gets the stock template plus
-#  updates, the packages above, the locale and the time zone.
+#  Interactive runs ask about these; a profile can set them too. All
+#  default to off, which gives the stock template plus updates, the
+#  packages above, the locale and the time zone.
+#  Profile only: the hooks, UU_EXTRA_ORIGINS, several SSH keys per user.
 # =============================================================================
 
 # --- Users ---
@@ -339,6 +340,51 @@ _valid_pubkeys() {
     (( n > 0 ))
 }
 
+_valid_file_url()    { [[ "$1" =~ ^https://[^[:space:]]+/[^/[:space:]]+$ ]]; }
+_valid_relayhost()   { [[ "$1" =~ ^[][A-Za-z0-9.:-]+$ ]]; }
+_valid_domain()      { [[ "$1" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ ]]; }
+_valid_email()       { [[ "$1" =~ ^[^[:space:]\"@]+@[^[:space:]\"@]+$ ]]; }
+_valid_reboot_time() { [[ "$1" == "now" || "$1" =~ ^([01][0-9]|2[0-3]):[0-5][0-9]$ ]]; }
+_valid_nonblank()    { [[ -n "${1//[[:space:]]/}" ]]; }
+
+# Ask a yes/no question. Enter keeps the current answer.
+# Usage: _ask_yes_no "Question" <current: yes|no>   -> result in $ANS (yes|no)
+_ask_yes_no() {
+    local prompt="$1" cur="${2:-no}" hint="y/N" a
+    [[ "$cur" == "yes" ]] && hint="Y/n"
+    while true; do
+        read -rp "${prompt} (${hint}): " a
+        case "${a:-$cur}" in
+            [Yy]|[Yy][Ee][Ss]) ANS="yes"; return ;;
+            [Nn]|[Nn][Oo])     ANS="no";  return ;;
+        esac
+        warn "Answer y or n."
+    done
+}
+
+# Ask for a value. Enter keeps the current one; "-" clears it.
+# Usage: _ask_value "Prompt" <current> <check function> "<hint when wrong>" [required]
+#   -> result in $ANS
+_ask_value() {
+    local prompt="$1" cur="$2" check="$3" hint="$4" required="${5:-}" a shown
+    shown="${cur%%$'\n'*}"
+    (( ${#shown} > 40 )) && shown="${shown:0:37}..."
+    while true; do
+        read -rp "${prompt} [${shown:-none}]: " a
+        a="${a:-$cur}"
+        [[ "$a" == "-" ]] && a=""
+        if [[ -z "$a" ]]; then
+            if [[ -z "$required" ]]; then ANS=""; return; fi
+            warn "This one is needed. $hint"
+        elif "$check" "$a"; then
+            ANS="$a"
+            return
+        else
+            warn "$hint"
+        fi
+    done
+}
+
 # Wrap a value in double quotes, escaped, so it is safe to 'source' back in.
 _conf_val() {
     local s="$1"
@@ -514,6 +560,11 @@ TMP_DIR=""               # host-side temp files (may hold the mail password)
 LAST_ERR_LINE=""
 TEMPLATE_CONVERTED="no"
 GUEST_SCRIPT="/root/.create-lxc-setup.sh"   # path inside the container
+
+# 'pct exec' hands the host's locale (e.g. en_GB.UTF-8) to the container,
+# where it may not exist yet: every command then prints locale warnings.
+# C.UTF-8 is built into Ubuntu and Debian, so commands are run with that.
+GUEST_ENV=(env LANG=C.UTF-8 LC_ALL=C.UTF-8 LANGUAGE=)
 
 on_exit() {
     local rc=$?
@@ -878,10 +929,12 @@ get_valid_ctid() {
 #  QUESTIONS
 #  Tip: at any prompt showing [a value], press Enter to keep it.
 # =============================================================================
+# fwbr* are per-guest bridges the Proxmox firewall makes: not for attaching to.
 _host_bridges() {
     local d n
     for d in /sys/class/net/*; do
         n="${d##*/}"
+        [[ "$n" == fwbr* ]] && continue
         if [[ -d "$d/bridge" || "$n" == vmbr* ]]; then
             echo "$n"
         fi
@@ -972,6 +1025,167 @@ user_prompts() {
     _read_number "Memory in MB" "$MEM" 128 1048576;          MEM="$NUM"
     _read_number "Disk size in GB" "${DISK_SIZE%G}" 2 65536; DISK_SIZE="${NUM}G"
     _prompt_network
+
+    # A template never runs, so it has nothing to start.
+    if ! _is_yes "$CONVERT_TO_TEMPLATE"; then
+        local cur="no"
+        [[ "$START_ON_BOOT" == "1" ]] && cur="yes"
+        echo ""
+        _ask_yes_no "Start this container when the Proxmox host boots?" "$cur"
+        [[ "$ANS" == "yes" ]] && START_ON_BOOT="1" || START_ON_BOOT="0"
+    fi
+}
+
+# =============================================================================
+#  OPTIONAL FEATURE QUESTIONS
+#  Interactive runs only. Everything asked here can also be set in a profile.
+# =============================================================================
+_KEY_HINT="Paste one public key line, e.g. ssh-ed25519 AAAA... name"
+_USER_HINT="Use lower-case letters, digits, '_' and '-' (not 'root')."
+
+# Hidden input. Enter keeps a password that is already set.
+_prompt_postfix_pass() {
+    local p
+    while true; do
+        read -rsp "Mail password / app password${POSTFIX_PASS:+ [keep current]}: " p
+        echo ""
+        p="${p:-$POSTFIX_PASS}"
+        if [[ -n "$p" ]]; then POSTFIX_PASS="$p"; return; fi
+        warn "A password is needed to log in to the relay."
+    done
+}
+
+_prompt_users() {
+    echo ""
+    echo "Users (SSH key only, nobody gets a password)"
+    _ask_value "SSH public key for root" "$ROOT_SSH_KEY" _valid_pubkeys "$_KEY_HINT"
+    ROOT_SSH_KEY="$ANS"
+
+    _ask_value "Ansible service user (e.g. ansible)" "$ANSIBLE_USER" _valid_username "$_USER_HINT"
+    ANSIBLE_USER="$ANS"
+    if [[ -n "$ANSIBLE_USER" ]]; then
+        _ask_value "SSH public key for $ANSIBLE_USER" "$ANSIBLE_SSH_KEY" _valid_pubkeys "$_KEY_HINT" required
+        ANSIBLE_SSH_KEY="$ANS"
+    fi
+
+    while true; do
+        _ask_value "Your own admin user" "$ADMIN_USER" _valid_username "$_USER_HINT"
+        [[ -z "$ANS" || "$ANS" != "$ANSIBLE_USER" ]] && break
+        warn "That is the Ansible user. Choose a different name."
+    done
+    ADMIN_USER="$ANS"
+    if [[ -n "$ADMIN_USER" ]]; then
+        _ask_value "SSH public key for $ADMIN_USER" "$ADMIN_SSH_KEY" _valid_pubkeys "$_KEY_HINT" required
+        ADMIN_SSH_KEY="$ANS"
+    fi
+}
+
+_prompt_zsh() {
+    echo ""
+    _ask_yes_no "Install zsh, with dotfiles for new users?" "$ZSH_DOTFILES"
+    ZSH_DOTFILES="$ANS"
+    _is_yes "$ZSH_DOTFILES" || return 0
+
+    local url
+    if [[ ${#DOTFILES_URLS[@]} -gt 0 ]]; then
+        printf '    %s\n' "${DOTFILES_URLS[@]}"
+        _ask_yes_no "Keep these dotfile URLs?" yes
+        [[ "$ANS" == "yes" ]] && return 0
+        DOTFILES_URLS=()
+    fi
+    echo "  Dotfile URLs (https, straight to the file), one per line. Blank line to finish."
+    while true; do
+        read -rp "  URL: " url
+        [[ -z "$url" ]] && break
+        if _valid_file_url "$url"; then
+            DOTFILES_URLS+=("$url")
+        else
+            warn "Not an https file URL, e.g. https://raw.githubusercontent.com/you/dotfiles/master/.zshrc"
+        fi
+    done
+}
+
+_prompt_postfix() {
+    echo ""
+    _ask_yes_no "Set up Postfix to send mail through a relay (e.g. Gmail)?" "$POSTFIX_RELAY"
+    POSTFIX_RELAY="$ANS"
+    _is_yes "$POSTFIX_RELAY" || return 0
+
+    _ask_value "Relay host" "$POSTFIX_RELAYHOST" _valid_relayhost "Example: [smtp.gmail.com]:587" required
+    POSTFIX_RELAYHOST="$ANS"
+    _ask_value "Relay login" "$POSTFIX_USER" _valid_nonblank "Example: you@gmail.com" required
+    POSTFIX_USER="$ANS"
+    _prompt_postfix_pass
+    _ask_value "Mail domain (mail is sent as <hostname>@<domain>)" "$MAIL_DOMAIN" _valid_domain "Example: example.com" required
+    MAIL_DOMAIN="$ANS"
+}
+
+_prompt_unattended_upgrades() {
+    echo ""
+    _ask_yes_no "Install updates automatically (unattended-upgrades)?" "$UNATTENDED_UPGRADES"
+    UNATTENDED_UPGRADES="$ANS"
+    _is_yes "$UNATTENDED_UPGRADES" || return 0
+
+    _ask_yes_no "  All updates, not only security fixes?" "$UU_INCLUDE_UPDATES"
+    UU_INCLUDE_UPDATES="$ANS"
+    _ask_value "  Send reports to (email)" "$UU_MAIL" _valid_email "Example: you@example.com"
+    UU_MAIL="$ANS"
+
+    local cur="no"
+    [[ "$UU_AUTO_REBOOT" == "true" ]] && cur="yes"
+    _ask_yes_no "  Reboot by itself when an update needs it?" "$cur"
+    if [[ "$ANS" == "yes" ]]; then
+        UU_AUTO_REBOOT="true"
+        _ask_value "  Reboot time (HH:MM or now)" "$UU_REBOOT_TIME" _valid_reboot_time "Example: 06:00" required
+        UU_REBOOT_TIME="$ANS"
+    else
+        UU_AUTO_REBOOT="false"
+    fi
+}
+
+_prompt_tweaks() {
+    echo ""
+    echo "System tweaks"
+    _ask_yes_no "Remove snapd and keep it out?" "$REMOVE_SNAPD";                REMOVE_SNAPD="$ANS"
+    _ask_yes_no "Turn IPv6 off inside the container?" "$DISABLE_IPV6";          DISABLE_IPV6="$ANS"
+    _ask_yes_no "Let pip install system-wide?" "$PIP_BREAK_SYSTEM_PACKAGES";    PIP_BREAK_SYSTEM_PACKAGES="$ANS"
+    _ask_yes_no "Apply the sudo 'disable_coredump' fix?" "$SUDO_COREDUMP_FIX";  SUDO_COREDUMP_FIX="$ANS"
+
+    if [[ "$UNPRIVILEGED" == "1" ]]; then
+        local cur="no"
+        [[ "$KEYCTL" == "1" ]] && cur="yes"
+        _ask_yes_no "Allow keyctl (needed to run Docker in this container)?" "$cur"
+        [[ "$ANS" == "yes" ]] && KEYCTL="1" || KEYCTL="0"
+    fi
+}
+
+prompt_features() {
+    [[ "$UNATTENDED" == "yes" ]] && return 0
+    header "Optional Features"
+    echo "  Switched on now: $(_features_summary)"
+    echo ""
+
+    # A first run walks through them; a profile run offers to skip.
+    local go="yes"
+    [[ -n "$CONFIG_FILE" ]] && go="no"
+    _ask_yes_no "Go through the optional features?" "$go"
+    if [[ "$ANS" == "no" ]]; then
+        # Saved profiles never hold the mail password: ask for it here.
+        if _is_yes "$POSTFIX_RELAY" && [[ -z "$POSTFIX_PASS" ]]; then
+            _prompt_postfix_pass
+        fi
+        return 0
+    fi
+
+    echo ""
+    echo "  Enter keeps the value in [brackets]. Type - to clear one."
+    echo "  Profile only: UPLOAD_FILES, PROVISION_SCRIPTS, UU_EXTRA_ORIGINS,"
+    echo "  and more than one SSH key per user."
+    _prompt_users
+    _prompt_zsh
+    _prompt_postfix
+    _prompt_unattended_upgrades
+    _prompt_tweaks
 }
 
 # Relative hook paths are looked up next to the profile.
@@ -1030,7 +1244,7 @@ validate_features() {
 
     if _is_yes "$ZSH_DOTFILES"; then
         for v in "${DOTFILES_URLS[@]}"; do
-            [[ "$v" =~ ^https://[^[:space:]]+/[^/[:space:]]+$ ]] \
+            _valid_file_url "$v" \
                 || die "DOTFILES_URLS entry is not an https file URL: $v"
         done
     fi
@@ -1038,18 +1252,18 @@ validate_features() {
     if _is_yes "$POSTFIX_RELAY"; then
         [[ -n "$POSTFIX_RELAYHOST" && -n "$POSTFIX_USER" && -n "$POSTFIX_PASS" ]] \
             || die "POSTFIX_RELAY=yes needs POSTFIX_RELAYHOST, POSTFIX_USER and POSTFIX_PASS in the profile."
-        [[ "$POSTFIX_RELAYHOST" =~ ^[][A-Za-z0-9.:-]+$ ]] \
+        _valid_relayhost "$POSTFIX_RELAYHOST" \
             || die "Invalid POSTFIX_RELAYHOST '$POSTFIX_RELAYHOST'. Example: [smtp.gmail.com]:587"
-        [[ "$MAIL_DOMAIN" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ ]] \
+        _valid_domain "$MAIL_DOMAIN" \
             || die "POSTFIX_RELAY=yes needs MAIL_DOMAIN, e.g. example.com."
     fi
 
     if _is_yes "$UNATTENDED_UPGRADES"; then
         [[ "$UU_AUTO_REBOOT" == "true" || "$UU_AUTO_REBOOT" == "false" ]] \
             || die "UU_AUTO_REBOOT must be \"true\" or \"false\"."
-        [[ "$UU_REBOOT_TIME" == "now" || "$UU_REBOOT_TIME" =~ ^([01][0-9]|2[0-3]):[0-5][0-9]$ ]] \
+        _valid_reboot_time "$UU_REBOOT_TIME" \
             || die "UU_REBOOT_TIME must be HH:MM or \"now\"."
-        [[ -z "$UU_MAIL" || "$UU_MAIL" =~ ^[^[:space:]\"@]+@[^[:space:]\"@]+$ ]] \
+        [[ -z "$UU_MAIL" ]] || _valid_email "$UU_MAIL" \
             || die "Invalid UU_MAIL '$UU_MAIL'."
         for v in "${UU_EXTRA_ORIGINS[@]}"; do
             [[ "$v" != *\"* && "$v" == *=* ]] \
@@ -1157,6 +1371,9 @@ print_summary() {
     _row "Type:"                "$kind${NESTING:+, $(_lxc_features)}"
     _row "Network:"             "$net"
     _row "Tags:"                "$TAG"
+    if ! _is_yes "$CONVERT_TO_TEMPLATE"; then
+        _row "Start at boot:"   "$([[ "$START_ON_BOOT" == "1" ]] && echo yes || echo no)"
+    fi
     _row "Locale / Timezone:"   "$LOCAL_LANG / ${TZ:-(unchanged)}"
     _row "Packages:"            "$BASE_PKGS${EXTRA_PKGS:+,$EXTRA_PKGS}"
     _row "Upgrade packages:"    "$APT_UPGRADE"
@@ -1801,7 +2018,7 @@ push_guest_script() {
 
 # Usage: run_guest provision | finish | seal
 run_guest() {
-    pct exec "$CTID" -- bash "$GUEST_SCRIPT" "$1"
+    pct exec "$CTID" -- "${GUEST_ENV[@]}" bash "$GUEST_SCRIPT" "$1"
 }
 
 run_hooks() {
@@ -1812,9 +2029,9 @@ run_hooks() {
         header "Hook: $s"
         pct push "$CTID" "$src" "$hook" --perms 0700
         if [[ "$(head -c 2 "$src")" == "#!" ]]; then
-            pct exec "$CTID" -- "$hook"
+            pct exec "$CTID" -- "${GUEST_ENV[@]}" "$hook"
         else
-            pct exec "$CTID" -- /bin/sh "$hook"
+            pct exec "$CTID" -- "${GUEST_ENV[@]}" /bin/sh "$hook"
         fi
         pct exec "$CTID" -- rm -f "$hook"
         success "Hook finished: $s"
@@ -1859,11 +2076,15 @@ main() {
 
     # 1. Checks and questions (nothing is changed yet)
     proxmox_check
-    validate_features
+    # Unattended: catch a bad profile before anything else. Interactive:
+    # the questions can still fix it, so it is checked after them.
+    [[ "$UNATTENDED" == "yes" ]] && validate_features
     select_os
     select_storage
     get_valid_ctid
     user_prompts
+    prompt_features
+    validate_features
     validate_config
     print_summary
 

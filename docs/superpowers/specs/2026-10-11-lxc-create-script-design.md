@@ -17,7 +17,7 @@ follows the conventions of `create-ubuntu-cloud-template.sh`.
 | Output | Both: a running container, or a template with `--template` |
 | Distros | Ubuntu and Debian "standard" templates from `pveam` |
 | Structure | Single self-contained file plus `profile.conf.example` |
-| Optional features | Profile toggles, all off by default |
+| Optional features | All off by default; asked in interactive runs, or set in a profile |
 | App installs (e.g. OliveTin) | Hook scripts, not built in |
 | Secrets | Profile only (git-ignored `*.conf`); none in the script |
 
@@ -72,6 +72,14 @@ container ID. The hostname is saved only if it was chosen by hand.
 passwordless sudo), `ZSH_DOTFILES`, `POSTFIX_RELAY`, `UNATTENDED_UPGRADES`
 (`51unattended-upgrades` adds to the distro defaults), `REMOVE_SNAPD`,
 `DISABLE_IPV6`, `PIP_BREAK_SYSTEM_PACKAGES`, `SUDO_COREDUMP_FIX`, `KEYCTL`.
+
+Interactive runs ask about each feature (a run with `--config` offers to
+skip the questions). Hooks, `UU_EXTRA_ORIGINS` and multiple SSH keys per
+user stay profile only. The mail password is asked with hidden input and is
+never saved.
+
+Commands run in the container with `LANG=C.UTF-8 LC_ALL=C.UTF-8`, because
+`pct exec` otherwise passes the host locale in before it exists there.
 
 ## Clones
 

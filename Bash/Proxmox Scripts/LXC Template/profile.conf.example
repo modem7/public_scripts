@@ -13,8 +13,7 @@
 #  ignores *.conf.
 #
 #  The script can also write a profile for you: answer its questions once
-#  and save them when asked at the summary. Then edit the saved file to
-#  switch on the optional features.
+#  (optional features included) and save them when asked at the summary.
 #
 #  Not set here on purpose:
 #    Container ID    chosen each run (--ctid / --auto-ctid), to avoid clashes.
