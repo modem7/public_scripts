@@ -12,6 +12,10 @@
 #  (chmod 600) and out of git. The .gitignore in this folder already
 #  ignores *.conf.
 #
+#  The script can also write a profile for you: answer its questions once
+#  and save them when asked at the summary. Then edit the saved file to
+#  switch on the optional features.
+#
 #  Not set here on purpose:
 #    Container ID    chosen each run (--ctid / --auto-ctid), to avoid clashes.
 #    Danger flags    --force-overwrite etc. are command line only.

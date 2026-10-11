@@ -43,7 +43,10 @@ Same shape as the VM script: interactive prompts, `--config`, `--unattended`,
 `--i-know-what-i-am-doing`. Added: `--keep-on-failure`,
 `--print-guest-script`.
 
-Not included: saving a profile from the prompts. Copy `profile.conf.example`.
+As in the VM script, the answers can be saved as a profile at the summary,
+before any work starts. Every setting is written, including optional
+features carried over from a loaded profile, except `POSTFIX_PASS` and the
+container ID. The hostname is saved only if it was chosen by hand.
 
 ## Build steps
 
