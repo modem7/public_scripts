@@ -54,7 +54,16 @@ st() {
   t "$secs" "${SUDO[@]}" "$@"
 }
 # Strip control chars (keep tab, newline) so names cannot inject escapes.
-clean() { tr -d '\000-\010\013-\037\177'; }
+# With perl (perl-base is Essential), also drop C1 controls: UTF-8 C2 80-9F
+# and stray 0x80-0x9F bytes, keeping valid UTF-8 intact. Bytes only, no locale.
+if command -v perl >/dev/null 2>&1; then
+  clean() {
+    perl -pe 's/[\x00-\x08\x0B-\x1F\x7F]//g;
+      s/(\xC2[\x80-\x9F])|([\xC2-\xDF][\x80-\xBF]|\xE0[\xA0-\xBF][\x80-\xBF]|[\xE1-\xEC\xEE\xEF][\x80-\xBF]{2}|\xED[\x80-\x9F][\x80-\xBF]|\xF0[\x90-\xBF][\x80-\xBF]{2}|[\xF1-\xF3][\x80-\xBF]{3}|\xF4[\x80-\x8F][\x80-\xBF]{2})|[\x80-\x9F]/defined $2 ? $2 : ""/ge'
+  }
+else
+  clean() { tr -d '\000-\010\013-\037\177'; }
+fi
 # du -sh one path, quiet.
 dush() { st 120 du -xsh "$@" 2>/dev/null | clean; }
 # First line of a quiet, time-limited command. Never fails.
@@ -147,6 +156,15 @@ sub "journald"
 st 60 journalctl --disk-usage 2>&1 | tail -1
 sub "apt cache"
 dush /var/cache/apt
+sub "/var/cache (top 10)"
+{ st 120 du -xh --max-depth=2 /var/cache 2>/dev/null | sort -rh | head -10 | clean; } || true
+if [ -d /var/cache/netdata ] || ${SUDO[@]+"${SUDO[@]}"} test -d /var/cache/netdata 2>/dev/null; then
+  ndk=$(num "$({ st 120 du -xsk /var/cache/netdata 2>/dev/null | awk '{print $1}'; } || true)")
+  if [ "$ndk" -gt 512000 ]; then
+    echo "WARN: /var/cache/netdata is $(iec $((ndk * 1024))) (over 500M)"
+    echo "      fix: cap 'dbengine tier N retention size' in netdata.conf, or remove netdata if unused"
+  fi
+fi
 sub "snap"
 if [ -d /var/lib/snapd ]; then
   dush /var/lib/snapd
@@ -410,16 +428,28 @@ if [ "$HAVE_SD" = yes ]; then
       | awk '{for (i=1;i<=NF;i++) if ($i ~ /\.service$/) {print $i; break}}'; } || true)
   LOOPS=""
   if [ "${#UNITS[@]}" -gt 0 ]; then
-    LOOPS=$({ timeout 60 systemctl show -p Id -p NRestarts -- "${UNITS[@]}" 2>/dev/null | awk -F= '
-        /^Id=/{id=$2} /^NRestarts=/{if ($2+0 >= 100) print $2"\t"id}' | sort -rn; } || true)
+    # Blank line between units; property order is systemd's, not ours.
+    LOOPS=$({ timeout 60 systemctl show -p Id -p NRestarts -p ActiveState -p SubState -p UnitFileState \
+        -- "${UNITS[@]}" 2>/dev/null | awk -F= '
+        function out() { if (id != "" && n+0 >= 100) print n"\t"id"\t"as"\t"ss"\t"fs; id=n=as=ss=fs="" }
+        /^$/{out(); next}
+        {k=$1; v=substr($0, length($1)+2)}
+        k=="Id"{id=v} k=="NRestarts"{n=v} k=="ActiveState"{as=v} k=="SubState"{ss=v} k=="UnitFileState"{fs=v}
+        END{out()}' | sort -rn | clean; } || true)
   fi
+  nloop=0
   if [ -n "$LOOPS" ]; then
-    printf '%s\n' "$LOOPS" | head -10 | while IFS=$'\t' read -r n u; do
-      echo "WARN: $u restarted $n times"
-    done
-  else
-    echo "ok: no service with NRestarts >= 100 (${#UNITS[@]} checked)"
+    # NRestarts is historical: only WARN if the unit is running or restarting now.
+    while IFS=$'\t' read -r n u as ss fs; do
+      case "$as/$ss" in
+        active/*|activating/*|reloading/*|*/auto-restart*)
+          echo "WARN: $u restarted $n times, still looping (state $as/$ss)"
+          nloop=$((nloop + 1)) ;;
+        *) echo "info: $u restarted $n times earlier but is now ${fs:-?}/${as:-?}" ;;
+      esac
+    done < <(printf '%s\n' "$LOOPS" | head -10)
   fi
+  [ "$nloop" -eq 0 ] && echo "ok: no service currently looping with NRestarts >= 100 (${#UNITS[@]} checked)"
   sg=serial-getty@ttyS0.service
   sg_act=$(q systemctl is-active "$sg"); sg_en=$(q systemctl is-enabled "$sg")
   sg_n=$(q systemctl show -p NRestarts --value "$sg")
