@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Read-only disk triage for a full Docker host. Deletes nothing.
-# Usage: ./disk-triage.sh 2>&1 | tee /dev/shm/triage.txt
+# Usage: ./vm-disk-triage.sh 2>&1 | tee /dev/shm/triage.txt
 set -euo pipefail
 set +x
 
@@ -72,7 +72,7 @@ q() { { timeout 10 "$@" 2>/dev/null | head -1; } || true; }
 num() { case "${1:-}" in ''|*[!0-9]*) echo 0 ;; *) echo "$1" ;; esac; }
 iec() { numfmt --to=iec "$(num "$1")"; }
 
-printf 'disk-triage on %s at %s\n' "$(hostname)" "$(date -Is)"
+printf 'vm-disk-triage on %s at %s\n' "$(hostname)" "$(date -Is)"
 printf 'kernel %s | sudo: %s | docker: %s\n' "$(uname -r)" \
   "$([ "${#SUDO[@]}" -gt 0 ] || [ "$(id -u)" -eq 0 ] && echo yes || echo no)" \
   "$([ "${#DOCKER[@]}" -gt 0 ] && echo "${DOCKER[*]}" || echo unavailable)"
