@@ -1,23 +1,30 @@
 # =============================================================================
-#  build-templates.conf  -  your settings for build-templates.sh
-#  Copy to build-templates.conf and fill in. That file is git-ignored:
-#  it holds passwords and keys. Anything left out keeps the script default.
+#  shared.conf  -  settings for every template built by build-templates.sh
+#  Copy to shared.conf and fill in. That file is git-ignored: it holds
+#  passwords and keys. Anything left out keeps the script default.
+#
+#  Per-template VM settings (name, tags, packages, snapd, IPv6, desktop,
+#  RAM, disk) are not here: they live in profiles/<template>.conf.
+#  Copy profiles/<template>.conf.example for each template you build.
+#
+#  Moving from build-templates.conf: rename it to shared.conf. PKGS_* and
+#  TAG_BASE are no longer read (set EXTRA_VIRT_PKGS and TAG in the
+#  profiles instead).
 # =============================================================================
 
 # --- Paths ---
 # PUBLIC_SCRIPT="/root/create-ubuntu-cloud-template.sh"   # downloaded if missing
 # OUT_DIR="/root/template-build"                          # generated files (root-only)
 
-# --- Proxmox ---
+# --- Host defaults ---
+# Written into every profile first, so a profile can override any of them.
+# In a profile, override the SSH key with SSH_KEY, not CI_SSH_KEY.
 DISTRO_VER="resolute"
 DISK_STOR=""           # blank = the host's only VM-disk storage (local-lvm or
                        # local-zfs). Set it only if the host has several.
 NET_BRIDGE="vmbr0"
-VLAN=""
-TAG_BASE="template;ubuntu"
-
-# --- Cloud-init login on each clone ---
-CI_SSH_KEY="github.com/<your-github-user>"   # or the key itself
+VLAN=""                # blank = no VLAN tag
+CI_SSH_KEY="github.com/<your-github-user>"   # cloud-init user's key(s), or the key itself
 CLOUD_PASSWORD=""                            # blank = generated each build
 
 # --- Ansible user (required) ---
@@ -46,4 +53,4 @@ DOTFILES_RAW="https://raw.githubusercontent.com/<you>/dotfiles/master"   # blank
 # DOTFILES=(.p10k.zsh .zshrc .zshenv)
 # Whole ~/.wakatime.cfg for new users (blank = none):
 WAKATIME_CFG='[settings]
-api_key = waka_xxxxxxxx'
+api_key = xxxxxxxx'
