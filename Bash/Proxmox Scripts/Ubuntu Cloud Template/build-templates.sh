@@ -14,6 +14,7 @@
 #  Usage (as root, on the Proxmox host):
 #    ./build-templates.sh base|extras|desktop|all [-- <create-script args>]
 #    ./build-templates.sh --generate-only     # write files, don't build
+#    ./build-templates.sh --help              # full help, no root needed
 #
 #  Default create-script args: --unattended --vmid 52000 --auto-vmid --template
 #
@@ -88,6 +89,116 @@ declare PKGS_BASE="${PKGS_CORE}" \
         PKGS_DESKTOP="${PKGS_EXTRAS}"
 #   base:    extras without the admin tools
 #   desktop: extras, + GNOME packages from DESKTOP=yes
+
+# =============================================================================
+#  HELP
+#  Checked before the config and root checks, so --help works anywhere.
+# =============================================================================
+usage() {
+    cat <<'EOF'
+build-templates.sh: build Ubuntu cloud-init templates on a Proxmox host.
+
+Generates the profiles and payload scripts for three templates (base,
+extras, desktop), then runs create-ubuntu-cloud-template.sh --config
+<profile> to build each one.
+
+USAGE
+  ./build-templates.sh base|extras|desktop|all [-- <create-script args>]
+  ./build-templates.sh --generate-only
+  ./build-templates.sh -h|--help|help
+
+ARGUMENTS
+  base              Build the base template.
+  extras            Build the extras template.
+  desktop           Build the desktop template.
+  all               Build all three: base, extras, then desktop.
+  --generate-only   Write all profiles and payloads to OUT_DIR. Build nothing.
+  -- <args>         Passed as they are to create-ubuntu-cloud-template.sh.
+                    Default: --unattended --vmid 52000 --auto-vmid --template
+                    Any args given replace the whole default list, e.g.
+                    -- --unattended --vmid 53000 --auto-vmid --template
+  -h, --help, help  Show this help.
+
+TEMPLATES (named ubuntu-2604-<target>)
+  base      Server. aptitude, auto-apt-proxy, libsasl2-modules, tuned,
+            tuned-utils, unattended-upgrades, zsh.
+  extras    base plus admin tools: acl, bind9-dnsutils, cifs-utils, curl,
+            git, htop, needrestart, net-tools, plocate, unzip.
+  desktop   extras plus GNOME and RDP. Keeps snapd. 4096 MB RAM, 40G disk.
+  All three get: Postfix relay via Gmail, an ansible user with sudo,
+  unattended upgrades and zram to zswap on first boot. Also, each as set
+  in the config: a journald size cap, dotfiles in /etc/skel, and the
+  login shell, needrestart and Pro advert tweaks.
+
+CONFIG
+  build-templates.conf next to this script, or the file named by BUILD_CONF.
+  Start from build-templates.conf.example. Unset keys keep their defaults.
+  It holds secrets: chmod 600 it and never commit it.
+
+  Required:
+    ANSIBLE_SSH_PUBKEY   Public key for the ansible user.
+    GMAIL_USER           Gmail account mail is relayed through.
+    GMAIL_APP_PASSWORD   App password for that account.
+    MAIL_DOMAIN          Mail is sent as user@<short hostname>.MAIL_DOMAIN.
+
+  Optional (default):
+    DISTRO_VER           resolute
+    DISK_STOR            blank = the host's only VM-disk storage
+    NET_BRIDGE           vmbr0
+    VLAN                 blank
+    TAG_BASE             template;ubuntu
+    CI_SSH_KEY           blank (key(s), or github.com/<user>)
+    CLOUD_PASSWORD       blank = generated each build, shown at the end
+    UU_MAIL              blank = no unattended-upgrades mail
+    DOTFILES_RAW         blank = no dotfiles in /etc/skel
+    DOTFILES             .p10k.zsh .zshrc .zshenv
+    WAKATIME_CFG         blank = no .wakatime.cfg in /etc/skel
+    LOGIN_SHELL          /usr/bin/zsh (blank = leave bash)
+    NEEDRESTART_MODE     a (a, l, i, or blank = OS default)
+    HIDE_PRO_ADVERTS     yes
+    JOURNAL_MAX_MB       1024 (blank = OS default)
+    JOURNAL_MAX_PERCENT  10
+
+ENVIRONMENT
+  BUILD_CONF             Config file.
+                         Default: build-templates.conf next to this script
+  PUBLIC_SCRIPT          Local copy of create-ubuntu-cloud-template.sh.
+                         Default: /root/create-ubuntu-cloud-template.sh
+  OUT_DIR                Where generated files go.
+                         Default: /root/template-build
+  UPDATE_PUBLIC_SCRIPT   no = keep the local PUBLIC_SCRIPT. Default: yes
+
+OUTPUT
+  OUT_DIR/<target>.conf  Profile for each chosen template.
+  OUT_DIR/payload/       Payload scripts and files baked into the image.
+  Both are root-only and rewritten on every run.
+
+EXAMPLES
+  ./build-templates.sh --generate-only
+  ./build-templates.sh extras
+  ./build-templates.sh all
+  ./build-templates.sh base -- --unattended --vmid 53000 --auto-vmid --template
+  BUILD_CONF=/root/other.conf ./build-templates.sh desktop
+
+NOTES
+  - Run as root on the Proxmox host, --generate-only included.
+  - Each build downloads the latest create-ubuntu-cloud-template.sh from
+    GitHub to PUBLIC_SCRIPT, falling back to the copy already there.
+  - Each run downloads zram-to-zswap.sh from GitHub.
+  - Still manual, on the first clone of each template:
+      sudo ./verify-template.sh --send-test-mail <address>
+    (from a copy inside the clone), check the test mail arrived, and on
+    the desktop log in on the console once, log out, then RDP in with the
+    login from /root/rdp-credentials.txt.
+EOF
+}
+
+case "${1:-}" in
+    -h|--help|help) usage; exit 0 ;;
+    base|extras|desktop|all|--generate-only) ;;
+    "") { echo "Error: no target given."; echo; usage; } >&2; exit 1 ;;
+    *)  { echo "Error: unknown target: $1"; echo; usage; } >&2; exit 1 ;;
+esac
 
 [[ -f "$BUILD_CONF" ]] || { echo "Missing $BUILD_CONF (copy build-templates.conf.example)." >&2; exit 1; }
 # shellcheck source=/dev/null
@@ -481,7 +592,7 @@ case "$TARGET" in
     base|extras|desktop) PROFILES=("$TARGET") ;;
     all)                 PROFILES=(base extras desktop) ;;
     --generate-only)     PROFILES=(); GENERATE=(base extras desktop) ;;
-    *) die "Usage: $0 base|extras|desktop|all|--generate-only [-- <create-script args>]" ;;
+    *) usage >&2; exit 1 ;;   # unreachable: checked in HELP above
 esac
 
 [[ $EUID -eq 0 ]] || die "Run as root."
