@@ -17,7 +17,7 @@ jobs:
       issues: write
     steps:
         - name: 'Auto-assign issue'
-          uses: pozil/auto-assign-issue@v4.0.2
+          uses: pozil/auto-assign-issue@v4.1.0
           with:
             assignees: modem7
 
@@ -29,7 +29,7 @@ jobs:
       issues: write
     steps:
         - name: 'Auto-assign PR'
-          uses: pozil/auto-assign-issue@v4.0.2
+          uses: pozil/auto-assign-issue@v4.1.0
           with:
             assignees: modem7
 
