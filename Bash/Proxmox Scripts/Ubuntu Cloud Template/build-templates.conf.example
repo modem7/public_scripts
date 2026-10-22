@@ -26,9 +26,7 @@ ANSIBLE_SSH_PUBKEY="ssh-ed25519 AAAA... ansible"
 # --- Postfix relay through Gmail (required) ---
 GMAIL_USER="you@gmail.com"
 GMAIL_APP_PASSWORD="xxxxxxxxxxxxxxxx"        # Google app password
-MAIL_DOMAIN="example.com"
-# MAIL_FROM="%h@example.com"                 # %h = clone's short hostname
-# MAIL_FROM_NAME=""                          # blank = bare address in From:
+MAIL_DOMAIN="example.com"                    # mail is sent as user@<short hostname>.example.com
 
 # --- Unattended upgrades report (blank = no mail) ---
 UU_MAIL="you@gmail.com"
