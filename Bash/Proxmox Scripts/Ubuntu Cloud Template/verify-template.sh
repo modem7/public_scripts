@@ -134,7 +134,7 @@ else
             [[ "$hash" == "$CI_PASS" ]] && pass "$LOGIN_USER password matches the Cloud-Init tab" \
                                         || fail "$LOGIN_USER password differs from the Cloud-Init tab"
         else
-            [[ "$(perl -e 'print crypt($ARGV[0], $ARGV[1])' "$CI_PASS" "$hash")" == "$hash" ]] \
+            [[ "$(CI_PASS="$CI_PASS" perl -e 'print crypt($ENV{CI_PASS}, $ARGV[0])' "$hash")" == "$hash" ]] \
                 && pass "$LOGIN_USER password matches the Cloud-Init tab" \
                 || fail "$LOGIN_USER password differs from the Cloud-Init tab"
         fi
@@ -258,9 +258,18 @@ fqdn="$(hostname -s).$EXPECT_MAIL_DOMAIN"
 expect_pc myhostname "$fqdn"
 [[ "$(cat /etc/mailname 2>/dev/null)" == "$fqdn" ]] && pass "/etc/mailname = $fqdn (this clone's name)" \
                                                     || fail "/etc/mailname is not $fqdn (postfix-identity not run?)"
-from="$(hostname -s)@$EXPECT_MAIL_DOMAIN"
-grep -qF "$from" /etc/postfix/sender_canonical 2>/dev/null && pass "envelope sender rewritten to $from" || fail "sender_canonical doesn't use $from"
-grep -qF "From: $from" /etc/postfix/smtp_header_checks 2>/dev/null && pass "From: header rewritten to $from" || fail "smtp_header_checks doesn't use $from"
+expect_pc myorigin /etc/mailname
+expect_pc maximal_queue_lifetime 1d
+expect_pc bounce_queue_lifetime 1d
+# No sender rewrite: mail goes out as the natural user@<fqdn>.
+for k in sender_canonical_maps smtp_header_checks; do
+    v="$(pc "$k")"
+    [[ -z "$v" ]] && pass "$k unset (no sender rewrite)" || fail "$k = '$v', expected unset"
+done
+check "root mail aliased (root: line in /etc/aliases)" grep -q '^root:' /etc/aliases
+grep -qE "^root:[[:space:]]*${EXPECT_GMAIL_USER}[[:space:]]*$" /etc/aliases 2>/dev/null \
+    && pass "root mail goes to $EXPECT_GMAIL_USER" || warn "root: alias in /etc/aliases is not $EXPECT_GMAIL_USER"
+check 'no cron mail from /etc/crontab (MAILTO="")' grep -qx 'MAILTO=""' /etc/crontab
 sp=/etc/postfix/sasl/sasl_passwd
 if [[ -f "$sp" ]]; then
     grep -q "^\[smtp.gmail.com\]:587 ${EXPECT_GMAIL_USER}:." "$sp" && pass "Gmail login set for $EXPECT_GMAIL_USER (password not shown)" \
