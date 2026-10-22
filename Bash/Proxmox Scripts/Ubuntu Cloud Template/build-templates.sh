@@ -1,11 +1,19 @@
 #!/bin/bash
 # =============================================================================
 #  build-templates.sh
-#  Holds no secrets: those go in build-templates.conf (git-ignored).
+#  Holds no secrets: those go in shared.conf (git-ignored).
 #
 #  Builds modem7's Ubuntu cloud-init templates on a Proxmox host, fully
 #  offline, by generating profiles + payload scripts and handing them to
 #  the public create-ubuntu-cloud-template.sh via --config.
+#
+#  Two kinds of config, both git-ignored (copy the .example files):
+#    profiles/<t>.conf  VM settings per template: name, tags, packages,
+#                       snapd, IPv6, desktop, RAM, disk, ...
+#    shared.conf        settings for every template: mail, ansible,
+#                       dotfiles, tweaks, plus host defaults (storage,
+#                       bridge, VLAN, SSH key) a profile can override.
+#  This script only wires them together and adds the payloads.
 #
 #    base     server
 #    extras   server + admin tools
@@ -27,12 +35,13 @@ set -Eeuo pipefail
 
 # =============================================================================
 #  SETTINGS
-#  Your values live in build-templates.conf next to this script (or the file
-#  named by $BUILD_CONF). It is git-ignored: copy build-templates.conf.example
-#  to start. Anything not set there keeps the default below.
+#  Your values live in shared.conf next to this script (or the file named
+#  by $SHARED_CONF). It is git-ignored: copy shared.conf.example to start.
+#  Anything not set there keeps the default below. Per-template VM settings
+#  live in profiles/<t>.conf, not here.
 # =============================================================================
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-BUILD_CONF="${BUILD_CONF:-$SCRIPT_DIR/build-templates.conf}"
+PROFILES_DIR="${PROFILES_DIR:-$SCRIPT_DIR/profiles}"
 
 PUBLIC_SCRIPT="${PUBLIC_SCRIPT:-/root/create-ubuntu-cloud-template.sh}"   # refreshed from GitHub each run
 # Tried in order: the script's own folder (public_scripts #35), then where it
@@ -44,12 +53,12 @@ PUBLIC_SCRIPT_URLS=(
 ZSWAP_SCRIPT_URL="https://raw.githubusercontent.com/modem7/public_scripts/master/Bash/Server%20scripts/zram-to-zswap.sh"
 OUT_DIR="${OUT_DIR:-/root/template-build}"     # generated profiles + payloads (root-only)
 
+# --- Host defaults: written into every profile, which can override them ---
 DISTRO_VER="resolute"
 DISK_STOR=""                       # blank = the host's only VM-disk storage (local-lvm / local-zfs)
 NET_BRIDGE="vmbr0"
 VLAN=""
-TAG_BASE="template;ubuntu"
-CI_SSH_KEY=""                      # cloud-init user's key(s), or "github.com/<user>"
+CI_SSH_KEY=""                      # cloud-init user's key(s), or "github.com/<user>"; written as SSH_KEY
 CLOUD_PASSWORD=""                  # blank = generated each build, shown at the end
 
 ANSIBLE_SSH_PUBKEY=""              # required
@@ -76,19 +85,12 @@ HIDE_PRO_ADVERTS="yes"             # no Ubuntu Pro/ESM adverts in apt or the log
 JOURNAL_MAX_MB="1024"
 JOURNAL_MAX_PERCENT="10"
 
-# --- Packages ---
-# Extras is the reference template: the others are built the same way and
-# differ only in packages (desktop also adds GNOME, and keeps snapd).
+# --- Packages the payloads need ---
+# Added to every profile's EXTRA_VIRT_PKGS (only those it lacks), so editing
+# a profile can't break Postfix, unattended upgrades or the login shell.
 # bsd-mailx is installed by the postfix payload, AFTER the debconf preseed:
 # installed earlier it would pull postfix in with the default answers.
-PKGS_CORE="aptitude,auto-apt-proxy,libsasl2-modules,tuned,tuned-utils,unattended-upgrades,zsh"
-PKGS_TOOLS="acl,bind9-dnsutils,cifs-utils,curl,git,htop,needrestart,net-tools,plocate,unzip"
-PKGS_EXTRAS="${PKGS_CORE},${PKGS_TOOLS}"
-# shellcheck disable=SC2034  # read by name (PKGS_<TEMPLATE>) in generate
-declare PKGS_BASE="${PKGS_CORE}" \
-        PKGS_DESKTOP="${PKGS_EXTRAS}"
-#   base:    extras without the admin tools
-#   desktop: extras, + GNOME packages from DESKTOP=yes
+BUILDER_PKGS=(libsasl2-modules unattended-upgrades zsh)
 
 # =============================================================================
 #  HELP
@@ -100,7 +102,8 @@ build-templates.sh: build Ubuntu cloud-init templates on a Proxmox host.
 
 Generates the profiles and payload scripts for three templates (base,
 extras, desktop), then runs create-ubuntu-cloud-template.sh --config
-<profile> to build each one.
+<profile> to build each one. Each profile is assembled from shared.conf
+and your profiles/<target>.conf.
 
 USAGE
   ./build-templates.sh base|extras|desktop|all [-- <create-script args>]
@@ -119,36 +122,64 @@ ARGUMENTS
                     -- --unattended --vmid 53000 --auto-vmid --template
   -h, --help, help  Show this help.
 
-TEMPLATES (named ubuntu-2604-<target>)
-  base      Server. aptitude, auto-apt-proxy, libsasl2-modules, tuned,
-            tuned-utils, unattended-upgrades, zsh.
-  extras    base plus admin tools: acl, bind9-dnsutils, cifs-utils, curl,
-            git, htop, needrestart, net-tools, plocate, unzip.
-  desktop   extras plus GNOME and RDP. Keeps snapd. 4096 MB RAM, 40G disk.
+TEMPLATES
+  Name, tags, packages and VM settings come from profiles/<target>.conf.
+  The .example profiles give:
+  base      ubuntu-2604-base. Server. aptitude, auto-apt-proxy,
+            libsasl2-modules, tuned, tuned-utils, unattended-upgrades, zsh.
+  extras    ubuntu-2604-extras. base plus admin tools: acl, bind9-dnsutils,
+            cifs-utils, curl, git, htop, needrestart, net-tools, plocate,
+            unzip.
+  desktop   ubuntu-2604-desktop. extras plus GNOME and RDP. Keeps snapd.
+            4096 MB RAM, 40G disk.
   All three get: Postfix relay via Gmail, an ansible user with sudo,
   unattended upgrades and zram to zswap on first boot. Also, each as set
-  in the config: a journald size cap, dotfiles in /etc/skel, and the
+  in shared.conf: a journald size cap, dotfiles in /etc/skel, and the
   login shell, needrestart and Pro advert tweaks.
 
 CONFIG
-  build-templates.conf next to this script, or the file named by BUILD_CONF.
-  Start from build-templates.conf.example. Unset keys keep their defaults.
-  It holds secrets: chmod 600 it and never commit it.
+  Two kinds of file, both git-ignored. Copy the .example next to each.
 
-  Required:
+  profiles/<target>.conf (one per template, in PROFILES_DIR)
+    VM settings, as for create-ubuntu-cloud-template.sh --config (see
+    profile.conf.example): TEMPL_NAME_DEFAULT, TAG, EXTRA_VIRT_PKGS,
+    REMOVE_SNAPD, DISABLE_IPV6, TUNED_PROFILE, GROW_IMAGE_FIRST,
+    UNATTENDED_UPGRADES, UU_AUTOCLEAN_DAYS, ENABLE_FSTRIM_TIMER,
+    CONVERT_TO_TEMPLATE, and for the desktop DESKTOP, DESKTOP_RDP,
+    TABLET, VGA, MEM, BALLOON, DISK_SIZE. No secrets.
+    Must exist for each target built and pass bash -n.
+
+  shared.conf (settings for every template)
+    Looked up in this order: SHARED_CONF, BUILD_CONF, shared.conf next
+    to this script, then the old build-templates.conf (with a warning).
+    Unset keys keep their defaults. It holds secrets: chmod 600 it and
+    never commit it. PKGS_* and TAG_BASE are no longer read: set
+    EXTRA_VIRT_PKGS and TAG in the profiles.
+
+  How OUT_DIR/<target>.conf is put together, in order:
+    1. Host defaults from shared.conf (DISTRO_VER, DISK_STOR, NET_BRIDGE,
+       VLAN, CI_SSH_KEY as SSH_KEY, CLOUD_PASSWORD if set).
+    2. profiles/<target>.conf as it is, so it can override step 1.
+       Override the SSH key there with SSH_KEY, not CI_SSH_KEY.
+    3. The payloads, appended with +=: UPLOAD_FILES, CUSTOMIZE_SCRIPTS,
+       FIRSTBOOT_SCRIPTS, EXTRA_VC_ARGS, and any of libsasl2-modules,
+       unattended-upgrades and zsh missing from EXTRA_VIRT_PKGS.
+
+  shared.conf, required:
     ANSIBLE_SSH_PUBKEY   Public key for the ansible user.
     GMAIL_USER           Gmail account mail is relayed through.
     GMAIL_APP_PASSWORD   App password for that account.
     MAIL_DOMAIN          Mail is sent as user@<short hostname>.MAIL_DOMAIN.
 
-  Optional (default):
+  shared.conf, host defaults (default):
     DISTRO_VER           resolute
     DISK_STOR            blank = the host's only VM-disk storage
     NET_BRIDGE           vmbr0
     VLAN                 blank
-    TAG_BASE             template;ubuntu
     CI_SSH_KEY           blank (key(s), or github.com/<user>)
     CLOUD_PASSWORD       blank = generated each build, shown at the end
+
+  shared.conf, optional (default):
     UU_MAIL              blank = no unattended-upgrades mail
     DOTFILES_RAW         blank = no dotfiles in /etc/skel
     DOTFILES             .p10k.zsh .zshrc .zshenv
@@ -160,8 +191,11 @@ CONFIG
     JOURNAL_MAX_PERCENT  10
 
 ENVIRONMENT
-  BUILD_CONF             Config file.
-                         Default: build-templates.conf next to this script
+  SHARED_CONF            Shared config file.
+                         Default: shared.conf next to this script
+  BUILD_CONF             Old name for SHARED_CONF, still read.
+  PROFILES_DIR           Folder with the <target>.conf profiles.
+                         Default: profiles next to this script
   PUBLIC_SCRIPT          Local copy of create-ubuntu-cloud-template.sh.
                          Default: /root/create-ubuntu-cloud-template.sh
   OUT_DIR                Where generated files go.
@@ -178,7 +212,8 @@ EXAMPLES
   ./build-templates.sh extras
   ./build-templates.sh all
   ./build-templates.sh base -- --unattended --vmid 53000 --auto-vmid --template
-  BUILD_CONF=/root/other.conf ./build-templates.sh desktop
+  SHARED_CONF=/root/other.conf ./build-templates.sh desktop
+  PROFILES_DIR=/root/profiles ./build-templates.sh all
 
 NOTES
   - Run as root on the Proxmox host, --generate-only included.
@@ -200,13 +235,38 @@ case "${1:-}" in
     *)  { echo "Error: unknown target: $1"; echo; usage; } >&2; exit 1 ;;
 esac
 
-[[ -f "$BUILD_CONF" ]] || { echo "Missing $BUILD_CONF (copy build-templates.conf.example)." >&2; exit 1; }
-# shellcheck source=/dev/null
-source "$BUILD_CONF"
-
 # =============================================================================
 info() { echo -e "\033[0;36m[build]\033[0m $*"; }
+warn() { echo -e "\033[0;33m[build]\033[0m $*" >&2; }
 die()  { echo -e "\033[0;31m[build]\033[0m $*" >&2; exit 1; }
+
+# =============================================================================
+#  SHARED CONFIG
+#  SHARED_CONF, then BUILD_CONF (old name), then shared.conf here, then the
+#  old build-templates.conf. A file named by the environment must exist.
+# =============================================================================
+if [[ -n "${SHARED_CONF:-}" ]]; then
+    :
+elif [[ -n "${BUILD_CONF:-}" ]]; then
+    SHARED_CONF="$BUILD_CONF"
+elif [[ -f "$SCRIPT_DIR/shared.conf" ]]; then
+    SHARED_CONF="$SCRIPT_DIR/shared.conf"
+elif [[ -f "$SCRIPT_DIR/build-templates.conf" ]]; then
+    SHARED_CONF="$SCRIPT_DIR/build-templates.conf"
+    warn "Using the old $SHARED_CONF: rename it to shared.conf."
+else
+    SHARED_CONF="$SCRIPT_DIR/shared.conf"
+fi
+[[ -f "$SHARED_CONF" ]] || die "Missing $SHARED_CONF (copy shared.conf.example)."
+# shellcheck source=/dev/null
+source "$SHARED_CONF"
+
+# Settings that moved to the profiles. Ignored if still set.
+mapfile -t leftover < <(compgen -v PKGS_ || true)
+[[ -v TAG_BASE ]] && leftover+=(TAG_BASE)
+(( ${#leftover[@]} == 0 )) \
+    || warn "Ignored in $SHARED_CONF (set EXTRA_VIRT_PKGS and TAG in profiles/<t>.conf instead): ${leftover[*]}"
+unset leftover
 
 # Quote a value so it can be 'source'd back safely.
 q() { printf '%q' "$1"; }
@@ -480,54 +540,70 @@ EOF
 want() { [[ " ${GENERATE[*]} " == *" $1 "* ]]; }
 
 
-# Usage: write_profile <name> <template name> <packages> <extra lines...>
+# Profile file for a target.
+profile_src() { echo "$PROFILES_DIR/$1.conf"; }
+
+# The EXTRA_VIRT_PKGS a profile ends up with (host defaults, then the
+# profile), spaces removed. Read in a subshell so nothing leaks in here.
+profile_pkgs() {
+    (
+        EXTRA_VIRT_PKGS=""
+        # shellcheck source=/dev/null
+        source "$1" >/dev/null
+        printf '%s' "${EXTRA_VIRT_PKGS// /}"
+    )
+}
+
+# Usage: write_profile <target>
+# Assembles OUT_DIR/<target>.conf: header, host defaults from shared.conf,
+# the profile as it is (so it can override them), then the payload
+# plumbing appended with +=.
 write_profile() {
-    local name="$1" templ="$2" pkgs="$3"; shift 3
-    local p="$OUT_DIR/$name.conf"
+    local name="$1" src p have pkg missing=""
+    src="$(profile_src "$name")"
+    p="$OUT_DIR/$name.conf"
+    have="$(profile_pkgs "$src")" || die "Could not read $src."
+    for pkg in "${BUILDER_PKGS[@]}"; do
+        [[ ",$have," == *",$pkg,"* ]] || missing+="${missing:+,}$pkg"
+    done
     {
         cat <<EOF
 # Generated by build-templates.sh on $(date '+%Y-%m-%d %H:%M'). Do not edit:
-# change build-templates.sh and re-run it.
+# change the files below and re-run build-templates.sh.
+#   shared:  $SHARED_CONF
+#   profile: $src
+
+# --- Host defaults from the shared config (the profile can override) ---
 DISTRO_VER=$(q "$DISTRO_VER")
 DISK_STOR=$(q "$DISK_STOR")
 NET_BRIDGE=$(q "$NET_BRIDGE")
 VLAN=$(q "$VLAN")
-TEMPL_NAME_DEFAULT=$(q "$templ")
-TAG=$(q "$TAG_BASE;$name")
 SSH_KEY=$(q "$CI_SSH_KEY")
 $( [[ -n "$CLOUD_PASSWORD" ]] && echo "CLOUD_PASSWORD=$(q "$CLOUD_PASSWORD")" )
-EXTRA_VIRT_PKGS=$(q "$pkgs")
-CONVERT_TO_TEMPLATE="yes"
 
-# Same for every template (extras is the reference).
-# The stock root has ~1-2 GB free: grow first so the installs always fit.
-GROW_IMAGE_FIRST="yes"
-# The desktop keeps snapd: Firefox and the App Center are snaps.
-REMOVE_SNAPD="$( [[ "$name" == desktop ]] && echo no || echo yes )"
-TUNED_PROFILE="virtual-guest"
-DISABLE_IPV6="yes"
-ENABLE_FSTRIM_TIMER="yes"
-UNATTENDED_UPGRADES="yes"
-UU_AUTOCLEAN_DAYS="7"
-# No UU_AUTO_REBOOT: never reboot by itself (OS default). needrestart and
-# the login message say when a reboot is needed.
+# --- Profile: $src ---
+EOF
+        cat "$src"
+        cat <<EOF
 
-UPLOAD_FILES=(
+# --- Added by build-templates.sh: the payloads ---
+$( [[ -n "$missing" ]] && echo "EXTRA_VIRT_PKGS+=$(q "${have:+,}$missing")" )
+UPLOAD_FILES+=(
     $(q "$OUT_DIR/payload/51unattended-upgrades:/etc/apt/apt.conf.d/51unattended-upgrades")
     $(q "$OUT_DIR/payload/postfix-identity:/var/lib/cloud/scripts/per-boot/postfix-identity")
     $(q "$OUT_DIR/payload/zram-to-zswap.sh:/usr/local/sbin/zram-to-zswap.sh")
 $( [[ -n "$JOURNAL_MAX_MB" ]] && echo "    $(q "$OUT_DIR/payload/journald-size:/var/lib/cloud/scripts/per-boot/journald-size")" )
 )
-CUSTOMIZE_SCRIPTS=(
+CUSTOMIZE_SCRIPTS+=(
     $(q "$OUT_DIR/payload/ansible.sh")
     $(q "$OUT_DIR/payload/postfix.sh")
     $(q "$OUT_DIR/payload/skel.sh")
     $(q "$OUT_DIR/payload/tweaks.sh")
 )
-FIRSTBOOT_SCRIPTS=(
+FIRSTBOOT_SCRIPTS+=(
     $(q "$OUT_DIR/payload/zswap-firstboot.sh")
 )
-EXTRA_VC_ARGS=(
+EXTRA_VC_ARGS+=(
     --chmod "0755:/var/lib/cloud/scripts/per-boot/postfix-identity"
     --chmod "0755:/usr/local/sbin/zram-to-zswap.sh"
 $( [[ -n "$JOURNAL_MAX_MB" ]] && echo '    --chmod "0755:/var/lib/cloud/scripts/per-boot/journald-size"' )
@@ -535,20 +611,34 @@ $( [[ -n "$JOURNAL_MAX_MB" ]] && echo '    --chmod "0755:/var/lib/cloud/scripts/
     --run-command $(q "sed -i 's/^en_US.UTF-8 UTF-8/# en_US.UTF-8 UTF-8/' /etc/locale.gen && locale-gen")
 )
 EOF
-        printf '%s\n' "$@"
     } > "$p"
     info "Profile: $p"
+}
+
+# Every wanted profile must exist and parse. Checked before anything is
+# written, so a bad profile leaves OUT_DIR as it was.
+check_profiles() {
+    local t src
+    for t in base extras desktop; do
+        want "$t" || continue
+        src="$(profile_src "$t")"
+        [[ -f "$src" ]] || die "Missing profile $src (copy profiles/$t.conf.example to profiles/$t.conf and edit it)."
+        bash -n "$src" || die "Profile $src has a syntax error (see above)."
+        grep -qE '^[[:space:]]*TEMPL_NAME_DEFAULT=' "$src" \
+            || warn "$src does not set TEMPL_NAME_DEFAULT: the template gets the create script's default name."
+    done
 }
 
 generate() {
     local v
     for v in ANSIBLE_SSH_PUBKEY GMAIL_USER GMAIL_APP_PASSWORD MAIL_DOMAIN; do
-        [[ -n "${!v}" ]] || die "Set $v in $BUILD_CONF."
+        [[ -n "${!v}" ]] || die "Set $v in $SHARED_CONF."
     done
     [[ -z "$JOURNAL_MAX_MB" || ( "$JOURNAL_MAX_MB" =~ ^[0-9]+$ && "$JOURNAL_MAX_PERCENT" =~ ^[0-9]+$ ) ]] \
         || die "JOURNAL_MAX_MB and JOURNAL_MAX_PERCENT must be numbers."
     [[ -z "$NEEDRESTART_MODE" || "$NEEDRESTART_MODE" =~ ^[ali]$ ]] || die "NEEDRESTART_MODE must be a, l, i or blank."
     [[ -n "$WAKATIME_CFG" ]] || info "WAKATIME_CFG is blank: no .wakatime.cfg in /etc/skel."
+    check_profiles
 
     umask 077
     mkdir -p "$OUT_DIR/payload"
@@ -563,19 +653,11 @@ generate() {
     write_journald_payload
     chmod 700 "$OUT_DIR"/payload/*.sh "$OUT_DIR/payload/postfix-identity" "$OUT_DIR/payload/journald-size"
 
-    # Only the package list differs, plus the desktop's own extras.
-    local t pkgs_var
-    local -a extra
+    # Everything template-specific is in the profiles.
+    local t
     for t in base extras desktop; do
         want "$t" || continue
-        extra=()
-        [[ "$t" == desktop ]] && extra=(
-            'DESKTOP="yes"' 'DESKTOP_RDP="yes"'
-            'TABLET="1"' 'VGA="virtio"'
-            'MEM="4096"' 'BALLOON="2048"' 'DISK_SIZE="40G"'
-        )
-        pkgs_var="PKGS_${t^^}"
-        write_profile "$t" "ubuntu-2604-$t" "${!pkgs_var}" "${extra[@]}"
+        write_profile "$t"
     done
 }
 
