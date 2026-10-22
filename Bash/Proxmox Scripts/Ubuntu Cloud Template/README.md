@@ -38,7 +38,11 @@ Other forms:
 ./build-templates.sh base|extras|desktop|all
 ./build-templates.sh --generate-only
 ./build-templates.sh extras -- --unattended --vmid 52000 --auto-vmid --template
+./build-templates.sh --help
 ```
+
+`--help` (also `-h` or `help`) prints the full help and works without root
+or a config file.
 
 `--generate-only` writes the profiles and payloads without building anything.
 The default arguments passed to the generic script are
