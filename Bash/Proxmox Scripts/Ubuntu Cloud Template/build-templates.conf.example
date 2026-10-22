@@ -1,0 +1,51 @@
+# =============================================================================
+#  build-templates.conf  -  your settings for build-templates.sh
+#  Copy to build-templates.conf and fill in. That file is git-ignored:
+#  it holds passwords and keys. Anything left out keeps the script default.
+# =============================================================================
+
+# --- Paths ---
+# PUBLIC_SCRIPT="/root/create-ubuntu-cloud-template.sh"   # downloaded if missing
+# OUT_DIR="/root/template-build"                          # generated files (root-only)
+
+# --- Proxmox ---
+DISTRO_VER="resolute"
+DISK_STOR=""           # blank = the host's only VM-disk storage (local-lvm or
+                       # local-zfs). Set it only if the host has several.
+NET_BRIDGE="vmbr0"
+VLAN=""
+TAG_BASE="template;ubuntu"
+
+# --- Cloud-init login on each clone ---
+CI_SSH_KEY="github.com/<your-github-user>"   # or the key itself
+CLOUD_PASSWORD=""                            # blank = generated each build
+
+# --- Ansible user (required) ---
+ANSIBLE_SSH_PUBKEY="ssh-ed25519 AAAA... ansible"
+
+# --- Postfix relay through Gmail (required) ---
+GMAIL_USER="you@gmail.com"
+GMAIL_APP_PASSWORD="xxxxxxxxxxxxxxxx"        # Google app password
+MAIL_DOMAIN="example.com"
+# MAIL_FROM="%h@example.com"                 # %h = clone's short hostname
+# MAIL_FROM_NAME=""                          # blank = bare address in From:
+
+# --- Unattended upgrades report (blank = no mail) ---
+UU_MAIL="you@gmail.com"
+
+# --- System tweaks ---
+LOGIN_SHELL="/usr/bin/zsh"        # clone's login user + new users; blank = leave bash.
+#   /usr/bin, not /bin: your dotfiles compare $SHELL with `which zsh`.
+NEEDRESTART_MODE="a"          # a = restart services itself, l = list, i = ask; blank = OS default (i)
+HIDE_PRO_ADVERTS="yes"        # no Ubuntu Pro/ESM adverts in apt or the login message
+# Journal cap, re-worked out every boot: min(JOURNAL_MAX_MB, JOURNAL_MAX_PERCENT % of disk).
+# Blank JOURNAL_MAX_MB = OS default (10% of disk, capped at 4G).
+JOURNAL_MAX_MB="1024"
+JOURNAL_MAX_PERCENT="10"
+
+# --- /etc/skel ---
+DOTFILES_RAW="https://raw.githubusercontent.com/<you>/dotfiles/master"   # blank = none
+# DOTFILES=(.p10k.zsh .zshrc .zshenv)
+# Whole ~/.wakatime.cfg for new users (blank = none):
+WAKATIME_CFG='[settings]
+api_key = waka_xxxxxxxx'
