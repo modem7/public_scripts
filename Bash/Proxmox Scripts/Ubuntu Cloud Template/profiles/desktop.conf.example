@@ -1,0 +1,38 @@
+# =============================================================================
+#  profiles/desktop.conf  -  the desktop template: GNOME plus RDP
+#  Copy to profiles/desktop.conf and edit. That file is git-ignored.
+#
+#  A plain create-ubuntu-cloud-template.sh profile (see profile.conf.example
+#  for every key). build-templates.sh puts the host defaults from shared.conf
+#  (DISTRO_VER, DISK_STOR, NET_BRIDGE, VLAN, SSH_KEY, CLOUD_PASSWORD) before
+#  it, so anything set here wins. It then appends the payloads, plus any of
+#  libsasl2-modules, unattended-upgrades and zsh missing from EXTRA_VIRT_PKGS.
+#  No secrets here: they belong in shared.conf.
+# =============================================================================
+
+TEMPL_NAME_DEFAULT="ubuntu-2604-desktop"
+TAG="template;ubuntu;desktop"
+# The extras packages. DESKTOP=yes adds the GNOME ones itself.
+EXTRA_VIRT_PKGS="aptitude,auto-apt-proxy,libsasl2-modules,tuned,tuned-utils,unattended-upgrades,zsh,acl,bind9-dnsutils,cifs-utils,curl,git,htop,needrestart,net-tools,plocate,unzip"
+CONVERT_TO_TEMPLATE="yes"
+
+# The stock root has ~1-2 GB free: grow first so the installs always fit.
+GROW_IMAGE_FIRST="yes"
+# The desktop keeps snapd: Firefox and the App Center are snaps.
+REMOVE_SNAPD="no"
+TUNED_PROFILE="virtual-guest"
+DISABLE_IPV6="yes"
+ENABLE_FSTRIM_TIMER="yes"
+UNATTENDED_UPGRADES="yes"
+UU_AUTOCLEAN_DAYS="7"
+# No UU_AUTO_REBOOT: never reboot by itself (OS default). needrestart and
+# the login message say when a reboot is needed.
+
+# --- Desktop ---
+DESKTOP="yes"
+DESKTOP_RDP="yes"
+TABLET="1"
+VGA="virtio"
+MEM="4096"
+BALLOON="2048"
+DISK_SIZE="40G"

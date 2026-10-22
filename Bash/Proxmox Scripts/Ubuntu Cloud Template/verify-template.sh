@@ -17,7 +17,7 @@
 # =============================================================================
 set -uo pipefail
 
-# --- What the templates are meant to have (match build-templates.conf) ---
+# --- What the templates are meant to have (match shared.conf and profiles/*.conf) ---
 EXPECT_LANG="en_GB.UTF-8"
 EXPECT_TZ="Europe/London"
 EXPECT_KEYMAP="gb"
