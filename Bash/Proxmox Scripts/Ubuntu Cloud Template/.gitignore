@@ -1,3 +1,6 @@
 # Your profiles can hold passwords and SSH keys: never commit them.
 # The example (profile.conf.example) is not ignored.
 *.conf
+
+# Output of build-templates.sh (normally /root/template-build, in case OUT_DIR is set inside the repo).
+template-build/
