@@ -157,7 +157,10 @@ Other forms:
 
 `--verify` runs `verify-clone.sh` on each template right after it is built
 (see below). `--send-test-mail <address>` and `--keep` are passed on to it
-and only work with `--verify`. All three go before `--`.
+and only work with `--verify`. All three may go anywhere before `--`,
+mixed in with create-script args. Any other argument after the target is
+passed, in order, to the create script. Everything after `--` is passed on
+as it is, even `--verify`, `--keep` or `--send-test-mail`.
 
 `--help` (also `-h` or `help`) prints the full help and works without root,
 a config file or profiles. So does `--init`, which takes no other options.
