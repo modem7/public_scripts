@@ -1,6 +1,8 @@
 # =============================================================================
 #  profiles/desktop.conf  -  the desktop template: GNOME plus RDP
-#  Copy to profiles/desktop.conf and edit. That file is git-ignored.
+#  ./build-templates.sh --init copies this to profiles/desktop.conf in your config
+#  folder (next to shared.conf). Or copy it to profiles/desktop.conf next to the
+#  script: *.conf is git-ignored.
 #
 #  A plain create-ubuntu-cloud-template.sh profile (see profile.conf.example
 #  for every key). build-templates.sh puts the host defaults from shared.conf

@@ -1,6 +1,8 @@
 # =============================================================================
 #  profiles/extras.conf  -  the extras template: a server plus admin tools
-#  Copy to profiles/extras.conf and edit. That file is git-ignored.
+#  ./build-templates.sh --init copies this to profiles/extras.conf in your config
+#  folder (next to shared.conf). Or copy it to profiles/extras.conf next to the
+#  script: *.conf is git-ignored.
 #
 #  A plain create-ubuntu-cloud-template.sh profile (see profile.conf.example
 #  for every key). build-templates.sh puts the host defaults from shared.conf
