@@ -16,6 +16,8 @@ Scripts for building Ubuntu cloud-init VM templates on a Proxmox host.
   `build-templates.sh` (mail, Ansible, dotfiles, tweaks, host defaults).
 - `profiles/*.conf.example`: one VM profile per template.
 - `verify-template.sh`: run inside a clone to check everything was applied.
+- `verify-clone.sh`: run on the Proxmox host. Clones a template, boots the
+  clone, runs `verify-template.sh` inside it and removes the clone.
 
 ## Templates built by `build-templates.sh`
 
@@ -116,7 +118,39 @@ password from the config.
 - `/etc/crontab` sets `MAILTO=""`. Users' own crontabs are not changed, so add
   `MAILTO=""` to those if you do not want cron mail.
 
-## Verifying a clone
+## Verifying a template from the host
+
+`verify-clone.sh` does the whole check from the Proxmox host in one command. It
+clones the template, starts the clone, waits for the guest agent and for
+cloud-init, runs `verify-template.sh` inside the clone through the agent,
+prints the output and returns its exit code, then destroys the clone.
+
+```bash
+./verify-clone.sh 9002
+./verify-clone.sh 9002 --profile extras --send-test-mail you@example.com
+./verify-clone.sh 9002 --keep
+```
+
+Options (see `--help` for all of them):
+
+- `--profile` and `--send-test-mail <address>` are passed to
+  `verify-template.sh`. With the mail option the script also waits up to 60
+  seconds for Postfix to log `status=sent` for that address.
+- `--vmid <id>`: VMID for the clone. Default: the next free one. A VMID that
+  already exists is refused.
+- `--full [--storage <name>]`: full clone. Default is a linked clone, which
+  needs storage that supports it.
+- `--keep`: leave the clone running instead of destroying it.
+- `--timeout <secs>` and `--verify-timeout <secs>`: waits for the agent and
+  cloud-init (default 300), and for the verify run (default 600).
+
+The template needs `qemu-guest-agent` installed and the VM option `agent=1`.
+The clone is destroyed on success, failure and Ctrl-C. Only a VM this run
+created is ever stopped or destroyed. Exit codes: 0 passed, 1 a FAIL or a
+clone/start error, 2 usage error, 3 agent timeout, 4 cloud-init error, 5 guest
+command timeout.
+
+## Verifying a clone by hand
 
 After cloning a template and booting it, run inside the clone:
 
