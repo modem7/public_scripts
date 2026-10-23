@@ -13,6 +13,8 @@
 # =============================================================================
 
 TEMPL_NAME_DEFAULT="ubuntu-2604-extras"
+# This template's ID; --rebuild replaces it in place.
+VMID_DEFAULT="52001"
 TAG="template;ubuntu;extras"
 # base's packages, then the admin tools.
 EXTRA_VIRT_PKGS="aptitude,auto-apt-proxy,libsasl2-modules,tuned,tuned-utils,unattended-upgrades,zsh,acl,bind9-dnsutils,cifs-utils,curl,git,htop,needrestart,net-tools,plocate,unzip"
