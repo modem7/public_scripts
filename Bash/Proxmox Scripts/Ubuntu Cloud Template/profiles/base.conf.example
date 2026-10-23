@@ -13,6 +13,8 @@
 # =============================================================================
 
 TEMPL_NAME_DEFAULT="ubuntu-2604-base"
+# This template's ID; --rebuild replaces it in place.
+VMID_DEFAULT="52000"
 TAG="template;ubuntu;base"
 # extras without the admin tools.
 EXTRA_VIRT_PKGS="aptitude,auto-apt-proxy,libsasl2-modules,tuned,tuned-utils,unattended-upgrades,zsh"

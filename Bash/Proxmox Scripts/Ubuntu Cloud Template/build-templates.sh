@@ -27,12 +27,17 @@
 #    ./build-templates.sh base|extras|desktop|all [-- <create-script args>]
 #    ./build-templates.sh extras --verify     # build, then verify-clone.sh it
 #      (--send-test-mail <addr> and --keep are passed on; only with --verify)
-#      (--verify, --keep, --send-test-mail may go anywhere before --; other
-#       args after the target, and all args after --, go to the create script)
+#    ./build-templates.sh all --rebuild --verify   # replace each template in place
+#      (--rebuild, --verify, --keep, --send-test-mail may go anywhere before
+#       --; other args after the target, and all args after --, go to the
+#       create script)
 #    ./build-templates.sh --generate-only     # write files, don't build
 #    ./build-templates.sh --help              # full help, no root needed
 #
-#  Default create-script args: --unattended --vmid 52000 --auto-vmid --template
+#  Default create-script args, per profile:
+#    --unattended --template --vmid <profile's VMID_DEFAULT> --auto-vmid
+#  With --rebuild:
+#    --unattended --template --force-overwrite --i-know-what-i-am-doing
 #
 #  Still manual, on the FIRST clone of each template:
 #    - Postfix test: echo test | mail -s "test from $(hostname)" <you>
@@ -126,7 +131,7 @@ extras, desktop), then runs create-ubuntu-cloud-template.sh --config
 and your profiles/<target>.conf.
 
 USAGE
-  ./build-templates.sh base|extras|desktop|all [--verify [--keep]
+  ./build-templates.sh base|extras|desktop|all [--rebuild] [--verify [--keep]
                        [--send-test-mail <addr>]] [<create-script args>]
                        [-- <create-script args>]
   ./build-templates.sh --generate-only
@@ -147,6 +152,19 @@ ARGUMENTS
                     commented out. No root needed. Run it as the
                     user that builds (root), or set CONFIG_DIR.
                     Takes no target or other options.
+  --rebuild         Replace each template in place, at its profile's
+                    VMID_DEFAULT (each target needs its own). The new
+                    image is built first; only then is the old template
+                    destroyed and recreated at that ID. Only a stopped
+                    template is replaced: a normal or running VM at that
+                    ID stops the build. An ID not in use yet is just
+                    created. Checked before any build: every target has
+                    a valid, distinct VMID_DEFAULT, and no VM is a
+                    linked clone of a template to be replaced (remove
+                    such clones, or make them full clones, first).
+                    Passes --unattended --template --force-overwrite
+                    --i-know-what-i-am-doing; takes no create-script
+                    args. Not with --generate-only.
   --verify         After each template is built, run verify-clone.sh on
                     it with --profile <target> --config <shared.conf>.
                     A verify that fails or cannot run does not stop the
@@ -158,12 +176,15 @@ ARGUMENTS
                     running, and its VMID is shown in the summary. Only
                     with --verify.
   <args>            Any other args after the target are passed, in order,
-                    to create-ubuntu-cloud-template.sh. --verify, --keep
-                    and --send-test-mail may go anywhere before --,
-                    mixed in with them; they are not passed on.
+                    to create-ubuntu-cloud-template.sh. --rebuild,
+                    --verify, --keep and --send-test-mail may go anywhere
+                    before --, mixed in with them; they are not passed on.
   -- <args>         Everything after -- is passed as it is, even
-                    --verify, --keep or --send-test-mail.
-                    Default: --unattended --vmid 52000 --auto-vmid --template
+                    --rebuild, --verify, --keep or --send-test-mail.
+                    Default, per profile: --unattended --template
+                    --vmid <the profile's VMID_DEFAULT> --auto-vmid
+                    (the next free ID from there; 52000 if the profile
+                    has no VMID_DEFAULT).
                     Any args given replace the whole default list, e.g.
                     -- --unattended --vmid 53000 --auto-vmid --template
   -h, --help, help  Show this help.
@@ -171,12 +192,12 @@ ARGUMENTS
 TEMPLATES
   Name, tags, packages and VM settings come from profiles/<target>.conf.
   The .example profiles give:
-  base      ubuntu-2604-base. Server. aptitude, auto-apt-proxy,
+  base      ubuntu-2604-base, VMID 52000. Server. aptitude, auto-apt-proxy,
             libsasl2-modules, tuned, tuned-utils, unattended-upgrades, zsh.
-  extras    ubuntu-2604-extras. base plus admin tools: acl, bind9-dnsutils,
+  extras    ubuntu-2604-extras, VMID 52001. base plus admin tools: acl, bind9-dnsutils,
             cifs-utils, curl, git, htop, needrestart, net-tools, plocate,
             unzip.
-  desktop   ubuntu-2604-desktop. extras plus GNOME and RDP. Keeps snapd.
+  desktop   ubuntu-2604-desktop, VMID 52002. extras plus GNOME and RDP. Keeps snapd.
             4096 MB RAM, 40G disk.
   All three get: Postfix (relay set by MAIL_RELAY), an ansible user with
   sudo, unattended upgrades and zram to zswap on first boot. Also, each
@@ -190,12 +211,14 @@ CONFIG
 
   profiles/<target>.conf (one per template, in PROFILES_DIR)
     VM settings, as for create-ubuntu-cloud-template.sh --config (see
-    profile.conf.example): TEMPL_NAME_DEFAULT, TAG, EXTRA_VIRT_PKGS,
-    REMOVE_SNAPD, DISABLE_IPV6, TUNED_PROFILE, GROW_IMAGE_FIRST,
-    UNATTENDED_UPGRADES, UU_AUTOCLEAN_DAYS, ENABLE_FSTRIM_TIMER,
-    CONVERT_TO_TEMPLATE, and for the desktop DESKTOP, DESKTOP_RDP,
-    TABLET, VGA, MEM, BALLOON, DISK_SIZE. No secrets.
-    Must exist for each target built and pass bash -n.
+    profile.conf.example): TEMPL_NAME_DEFAULT, VMID_DEFAULT, TAG,
+    EXTRA_VIRT_PKGS, REMOVE_SNAPD, DISABLE_IPV6, TUNED_PROFILE,
+    GROW_IMAGE_FIRST, UNATTENDED_UPGRADES, UU_AUTOCLEAN_DAYS,
+    ENABLE_FSTRIM_TIMER, CONVERT_TO_TEMPLATE, and for the desktop
+    DESKTOP, DESKTOP_RDP, TABLET, VGA, MEM, BALLOON, DISK_SIZE. No
+    secrets. Must exist for each target built and pass bash -n.
+    VMID_DEFAULT is the template's ID (one per template; --rebuild
+    replaces the template there).
 
   shared.conf (settings for every template)
     Looked up in this order: SHARED_CONF, BUILD_CONF, shared.conf next
@@ -299,6 +322,7 @@ EXAMPLES
   ./build-templates.sh extras
   ./build-templates.sh all
   ./build-templates.sh all --verify --send-test-mail you@example.com
+  ./build-templates.sh all --rebuild --verify     # e.g. monthly
   ./build-templates.sh base -- --unattended --vmid 53000 --auto-vmid --template
   SHARED_CONF=/root/other.conf ./build-templates.sh desktop
   PROFILES_DIR=/root/profiles ./build-templates.sh all
@@ -313,8 +337,8 @@ NOTES
     checks in it and removes the clone. The template needs the guest
     agent. It takes a few minutes per template. The new template's VMID
     is the one VMID in qm list after the build that was not there
-    before; if there is not exactly one, that verify is skipped and
-    counts as failed.
+    before (with --rebuild: the profile's VMID_DEFAULT); if that does
+    not give exactly one, that verify is skipped and counts as failed.
   - Clones kept by --keep stay running until you remove them by hand:
     qm destroy <clone-vmid> --purge
   - Still manual, on the first clone of each template:
@@ -331,12 +355,13 @@ usage_error() { { echo "Error: $*"; echo; usage; } >&2; exit 1; }
 # This script's options are picked out anywhere before a literal --.
 # Every other argument after the target goes, in order, to the create
 # script. Everything after -- goes there as it is, -- itself dropped.
-TARGET="" VERIFY=no TEST_MAIL="" KEEP=no INIT=no
+TARGET="" VERIFY=no TEST_MAIL="" KEEP=no INIT=no REBUILD=no
 CREATE_ARGS=()
 while (( $# )); do
     case "$1" in
         --init)   INIT=yes ;;
         --verify) VERIFY=yes ;;
+        --rebuild) REBUILD=yes ;;
         --keep)   KEEP=yes ;;
         --send-test-mail)
             [[ -n "${2:-}" ]] || usage_error "--send-test-mail needs an address."
@@ -359,7 +384,7 @@ while (( $# )); do
     shift
 done
 if [[ "$INIT" == yes ]]; then
-    [[ -z "$TARGET" && "$VERIFY" == no && "$KEEP" == no && -z "$TEST_MAIL" && ${#CREATE_ARGS[@]} -eq 0 ]] \
+    [[ -z "$TARGET" && "$VERIFY" == no && "$KEEP" == no && "$REBUILD" == no && -z "$TEST_MAIL" && ${#CREATE_ARGS[@]} -eq 0 ]] \
         || usage_error "--init takes no target or other options."
     TARGET=--init
 fi
@@ -367,6 +392,9 @@ fi
 [[ "$VERIFY" == yes || -z "$TEST_MAIL" ]] || usage_error "--send-test-mail only works with --verify."
 [[ "$VERIFY" == yes || "$KEEP" == no ]] || usage_error "--keep only works with --verify."
 [[ "$VERIFY" == no || "$TARGET" != --generate-only ]] || usage_error "--verify does not work with --generate-only."
+[[ "$REBUILD" == no || "$TARGET" != --generate-only ]] || usage_error "--rebuild does not work with --generate-only."
+[[ "$REBUILD" == no || ${#CREATE_ARGS[@]} -eq 0 ]] \
+    || usage_error "--rebuild sets its own create-script args; remove them (or pass --force-overwrite --i-know-what-i-am-doing yourself, without --rebuild)."
 
 # =============================================================================
 info() { echo -e "\033[0;36m[build]\033[0m $*"; }
@@ -957,6 +985,64 @@ check_profiles() {
     done
 }
 
+# VM configs, searched for linked clones by --rebuild. Overridable for tests.
+QEMU_CONF_DIR="${QEMU_CONF_DIR:-/etc/pve/qemu-server}"
+
+# VMID_DEFAULT of a generated profile, blank if unset. Read in a subshell
+# so nothing leaks in here.
+profile_vmid() {
+    (
+        unset VMID_DEFAULT
+        # shellcheck source=/dev/null
+        source "$OUT_DIR/$1.conf" >/dev/null 2>&1 || true
+        printf '%s' "${VMID_DEFAULT:-}"
+    )
+}
+
+# Sets PROFILE_VMID[<target>] for each target built with the default
+# create args. Checked after the profiles are written, before any build.
+# Without --rebuild a missing VMID_DEFAULT means 52000 (the create
+# script's own default). With --rebuild each target needs its own, and
+# no VM may be a linked clone of a template about to be replaced.
+declare -A PROFILE_VMID=()
+check_vmids() {
+    local p id f src clones found=""
+    local -A owner=()
+    for p in "${PROFILES[@]}"; do
+        id="$(profile_vmid "$p")"
+        src="$(profile_src "$p")"
+        [[ -n "$id" || "$REBUILD" == yes ]] || id=52000
+        if [[ -z "$id" ]]; then
+            die "--rebuild needs a VMID_DEFAULT in the $p profile: set one in $src (generated: $OUT_DIR/$p.conf)."
+        fi
+        [[ "$id" =~ ^[1-9][0-9]{2,8}$ ]] \
+            || die "VMID_DEFAULT '$id' in the $p profile is not a VM ID (100 to 999999999): fix it in $src (generated: $OUT_DIR/$p.conf)."
+        if [[ "$REBUILD" == yes && -n "${owner[$id]:-}" ]]; then
+            die "Profiles ${owner[$id]} and $p both have VMID_DEFAULT=$id: with --rebuild, $p would overwrite ${owner[$id]}. Give each its own ID in its profile."
+        fi
+        owner[$id]="$p"
+        PROFILE_VMID[$p]="$id"
+    done
+    [[ "$REBUILD" == yes ]] || return 0
+
+    # A linked clone's config names the template's base disks: base-<id>-...
+    for p in "${PROFILES[@]}"; do
+        id="${PROFILE_VMID[$p]}"
+        [[ -f "$QEMU_CONF_DIR/$id.conf" ]] || continue
+        clones=""
+        for f in "$QEMU_CONF_DIR"/*.conf; do
+            [[ -f "$f" && "$f" != "$QEMU_CONF_DIR/$id.conf" ]] || continue
+            if grep -qF -- "base-$id-" "$f"; then
+                clones+=" $(basename "$f" .conf)"
+            fi
+        done
+        [[ -z "$clones" ]] || found+=$'\n'"  template $id ($p): linked clone(s)$clones"
+    done
+    [[ -z "$found" ]] || die "--rebuild cannot replace a template that linked clones still use:$found
+Remove those clones (qm destroy <clone> --purge) or make them full clones
+(qm clone, or qm move-disk) first. Nothing was built."
+}
+
 # True if an address is one of the .example placeholders.
 placeholder_addr() {
     local a="${1,,}"
@@ -1051,7 +1137,18 @@ generate() {
 # =============================================================================
 #  MAIN
 # =============================================================================
-(( ${#CREATE_ARGS[@]} )) || CREATE_ARGS=(--unattended --vmid 52000 --auto-vmid --template)
+# No create args given: the defaults. Without --rebuild, the build loop
+# adds --vmid <profile's VMID_DEFAULT> --auto-vmid per profile (--auto-vmid
+# alone would start at 100).
+DEFAULT_ARGS=no
+if (( ${#CREATE_ARGS[@]} == 0 )); then
+    DEFAULT_ARGS=yes
+    if [[ "$REBUILD" == yes ]]; then
+        CREATE_ARGS=(--unattended --template --force-overwrite --i-know-what-i-am-doing)
+    else
+        CREATE_ARGS=(--unattended --template)
+    fi
+fi
 
 case "$TARGET" in
     base|extras|desktop) PROFILES=("$TARGET") ;;
@@ -1071,6 +1168,8 @@ fi
 [[ -v GENERATE ]] || GENERATE=("${PROFILES[@]}")
 generate
 (( ${#PROFILES[@]} )) || { info "Files written to $OUT_DIR. Nothing built."; exit 0; }
+# Before any build, so a long build is not wasted.
+[[ "$DEFAULT_ARGS" == no ]] || check_vmids
 
 # Fetch the latest public script every run, so fixes are always picked up.
 # If GitHub can't be reached, fall back to the copy already here.
@@ -1111,19 +1210,30 @@ summary() {
     [[ "$KEEP" == no ]] || info "Remove each kept clone by hand: qm destroy <id> --purge"
 }
 
-# Usage: verify_built <target> <VMIDs before the build>
+# Usage: verify_built <target> <VMIDs before the build> [<template VMID>]
 # The new template is the one VMID that was not there before the build.
-# With --keep, the kept clone is found the same way, around the verify.
+# With --rebuild the old ID is reused, so it is given instead and only
+# checked to exist. With --keep, the kept clone is found as the one new
+# VMID around the verify.
 verify_built() {
-    local p="$1" before="$2" after new post kept="-" rc=0 args=()
-    if [[ "$before" == "?" ]] || ! after="$(list_vmids)"; then
+    local p="$1" before="$2" id="${3:-}" after="" new post kept="-" rc=0 args=()
+    if [[ -n "$id" ]]; then
+        new=""
+        if after="$(list_vmids)" && grep -qxF -- "$id" <<<"$after"; then
+            new="$id"
+        fi
+    elif [[ "$before" == "?" ]] || ! after="$(list_vmids)"; then
         new=""
     else
         new="$(comm -13 <(printf '%s\n' "$before") <(printf '%s\n' "$after") | grep -v '^$' || true)"
     fi
     if [[ -z "$new" || "$new" == *$'\n'* ]]; then
         new="${new//$'\n'/ }"
-        warn "Could not work out the VMID of the $p template (new VMIDs: ${new:-none}; want exactly one). Not verified."
+        if [[ -n "$id" ]]; then
+            warn "Could not work out the VMID of the $p template (qm list failed, or $id is not in it). Not verified."
+        else
+            warn "Could not work out the VMID of the $p template (new VMIDs: ${new:-none}; want exactly one). Not verified."
+        fi
         RESULTS+=("$p|?|-|skipped (VMID unknown)")
         VERIFY_FAILED=yes
         return 0
@@ -1151,20 +1261,32 @@ verify_built() {
 
 for p in "${PROFILES[@]}"; do
     info "Building: $p"
+    build_args=("${CREATE_ARGS[@]}")
+    if [[ "$DEFAULT_ARGS" == yes && "$REBUILD" == no ]]; then
+        build_args+=(--vmid "${PROFILE_VMID[$p]}" --auto-vmid)
+    fi
     if [[ "$VERIFY" == no ]]; then
-        bash "$PUBLIC_SCRIPT" --config "$OUT_DIR/$p.conf" "${CREATE_ARGS[@]}"
+        bash "$PUBLIC_SCRIPT" --config "$OUT_DIR/$p.conf" "${build_args[@]}"
         continue
     fi
-    before="$(list_vmids)" || { warn "qm list failed: the new VMID cannot be worked out."; before="?"; }
+    # With --rebuild the ID is known: no need for the VMIDs before.
+    before=""
+    if [[ "$REBUILD" == no ]]; then
+        before="$(list_vmids)" || { warn "qm list failed: the new VMID cannot be worked out."; before="?"; }
+    fi
     rc=0
-    bash "$PUBLIC_SCRIPT" --config "$OUT_DIR/$p.conf" "${CREATE_ARGS[@]}" || rc=$?
+    bash "$PUBLIC_SCRIPT" --config "$OUT_DIR/$p.conf" "${build_args[@]}" || rc=$?
     if (( rc )); then
         # A failed build stops the run, as without --verify.
         RESULTS+=("$p|-|-|not verified (build failed, exit $rc)")
         summary
         exit "$rc"
     fi
-    verify_built "$p" "$before"
+    if [[ "$REBUILD" == yes ]]; then
+        verify_built "$p" "$before" "${PROFILE_VMID[$p]}"
+    else
+        verify_built "$p" "$before"
+    fi
 done
 if [[ "$VERIFY" == yes ]]; then
     summary

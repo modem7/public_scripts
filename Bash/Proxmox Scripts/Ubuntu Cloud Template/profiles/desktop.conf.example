@@ -13,6 +13,8 @@
 # =============================================================================
 
 TEMPL_NAME_DEFAULT="ubuntu-2604-desktop"
+# This template's ID; --rebuild replaces it in place.
+VMID_DEFAULT="52002"
 TAG="template;ubuntu;desktop"
 # The extras packages. DESKTOP=yes adds the GNOME ones itself.
 EXTRA_VIRT_PKGS="aptitude,auto-apt-proxy,libsasl2-modules,tuned,tuned-utils,unattended-upgrades,zsh,acl,bind9-dnsutils,cifs-utils,curl,git,htop,needrestart,net-tools,plocate,unzip"

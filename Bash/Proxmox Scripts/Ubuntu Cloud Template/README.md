@@ -52,6 +52,14 @@ To update, run `git pull` in the clone, then `./build-templates.sh --init`
 to add any new settings to your config (appended, commented out), and build
 again. `./build-templates.sh --help` lists every option and setting.
 
+To refresh the templates (say monthly), rebuild them in place at their IDs:
+
+```bash
+./build-templates.sh all --rebuild --verify
+```
+
+See [Rebuilding in place](#rebuilding-in-place).
+
 ## Files
 
 - `create-ubuntu-cloud-template.sh`: the generic builder. Downloads an Ubuntu
@@ -71,9 +79,12 @@ again. `./build-templates.sh --help` lists every option and setting.
 
 ## Templates built by `build-templates.sh`
 
-- `base`: server.
-- `extras`: server plus admin tools.
-- `desktop`: GNOME plus RDP.
+- `base`: server, VMID 52000.
+- `extras`: server plus admin tools, VMID 52001.
+- `desktop`: GNOME plus RDP, VMID 52002.
+
+The IDs are `VMID_DEFAULT` in each profile. Without `--rebuild` a taken ID
+means the next free one from there.
 
 ## Config for `build-templates.sh`
 
@@ -99,8 +110,8 @@ are committed.
 
 Two kinds of file:
 
-- `profiles/<template>.conf`: the VM side of one template. Name, tags,
-  packages, snapd, IPv6, tuned, unattended upgrades and, for the desktop,
+- `profiles/<template>.conf`: the VM side of one template. Name, VMID
+  (`VMID_DEFAULT`), tags, packages, snapd, IPv6, tuned, unattended upgrades and, for the desktop,
   GNOME, RDP, RAM and disk size. It is a plain profile for
   `create-ubuntu-cloud-template.sh --config` (see `profile.conf.example`).
   No secrets.
@@ -150,24 +161,49 @@ Other forms:
 ./build-templates.sh --init
 ./build-templates.sh base|extras|desktop|all
 ./build-templates.sh --generate-only
-./build-templates.sh extras -- --unattended --vmid 52000 --auto-vmid --template
+./build-templates.sh extras -- --unattended --vmid 53000 --auto-vmid --template
 ./build-templates.sh all --verify --send-test-mail you@example.com
+./build-templates.sh all --rebuild --verify
 ./build-templates.sh --help
 ```
 
 `--verify` runs `verify-clone.sh` on each template right after it is built
 (see below). `--send-test-mail <address>` and `--keep` are passed on to it
-and only work with `--verify`. All three may go anywhere before `--`,
-mixed in with create-script args. Any other argument after the target is
-passed, in order, to the create script. Everything after `--` is passed on
-as it is, even `--verify`, `--keep` or `--send-test-mail`.
+and only work with `--verify`. `--rebuild` replaces each template in place
+(see [Rebuilding in place](#rebuilding-in-place)). All four may go anywhere
+before `--`, mixed in with create-script args. Any other argument after the
+target is passed, in order, to the create script. Everything after `--` is
+passed on as it is, even `--rebuild`, `--verify`, `--keep` or
+`--send-test-mail`.
 
 `--help` (also `-h` or `help`) prints the full help and works without root,
 a config file or profiles. So does `--init`, which takes no other options.
 
 `--generate-only` writes the profiles and payloads without building anything.
 The default arguments passed to the generic script are
-`--unattended --vmid 52000 --auto-vmid --template`.
+`--unattended --template --vmid <VMID_DEFAULT> --auto-vmid`, with each
+profile's own `VMID_DEFAULT` (52000 if it has none). Any create-script args
+you give replace the whole list.
+
+### Rebuilding in place
+
+`--rebuild` replaces each existing template at its profile's
+`VMID_DEFAULT`, so the IDs never change. It passes
+`--unattended --template --force-overwrite --i-know-what-i-am-doing` to the
+generic script, which builds the new image first and only then destroys the
+old template and recreates it at the same ID. It only replaces a stopped
+template: a normal VM or a running one at that ID stops the build. An ID not
+in use yet is simply created, so it also works the first time.
+
+Before anything is built, the builder checks that every target has a valid
+`VMID_DEFAULT`, that no two share one, and that no VM is a linked clone of a
+template about to be replaced (its disks would go with the template). If
+one is, it stops and lists the template and its clones: remove them
+(`qm destroy <clone> --purge`) or make them full clones first.
+
+`--rebuild` takes no create-script args and does not work with
+`--generate-only`. Profiles made by an older `--init` lack `VMID_DEFAULT`:
+run `--init` again and uncomment it, or add it by hand.
 
 `shared.conf` holds the mail password and SSH keys. Keep it mode 600 and
 never commit it. The builder refuses the placeholder `ANSIBLE_SSH_PUBKEY`
@@ -265,8 +301,9 @@ command timeout.
 `./build-templates.sh <target> --verify` does this for each template it
 builds, with `--profile <target>` and `--config` set to the `shared.conf` it
 used. It takes a few minutes per template. The new template's VMID is the one
-VMID in `qm list` after the build that was not there before. If there is not
-exactly one, that template is not verified and counts as a failure. A failed
+VMID in `qm list` after the build that was not there before (with
+`--rebuild`, the profile's `VMID_DEFAULT`). If that does not give exactly
+one, that template is not verified and counts as a failure. A failed
 verify does not stop the other targets. A summary is printed at the end, and
 the exit code is 1 if any verify failed. A failed build still stops the run
 with the create script's exit code. With `--keep`, each verify clone is left
