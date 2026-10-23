@@ -200,7 +200,7 @@ read_conf() {   # <file>: prints VERIFY_x=value NUL ..., ending with VERIFY_FROM
         JOURNAL_MAX_MB="1024" JOURNAL_MAX_PERCENT="10"
         # shellcheck source=/dev/null
         source "$1" >/dev/null 2>&1
-        unset MAIL_RELAY_PASSWORD GMAIL_APP_PASSWORD CLOUD_PASSWORD WAKATIME_CFG
+        unset MAIL_RELAY_PASSWORD GMAIL_APP_PASSWORD CLOUD_PASSWORD CI_PASSWORD WAKATIME_CFG
         # Old name, relay preset and root alias, as in build-templates.sh.
         [[ -n "$MAIL_RELAY_USER" ]] || MAIL_RELAY_USER="$GMAIL_USER"
         MAIL_RELAY="${MAIL_RELAY:-gmail}"

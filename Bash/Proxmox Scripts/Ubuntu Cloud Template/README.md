@@ -101,8 +101,8 @@ Two kinds of file:
 - `shared.conf`: the opinionated side, the same for every template. Ansible
   key, mail relay, unattended upgrades mail, dotfiles, WakaTime, login
   shell, needrestart, Pro adverts and the journald cap. Also a block of host
-  defaults (`DISTRO_VER`, `DISK_STOR`, `NET_BRIDGE`, `VLAN`, `CI_SSH_KEY`,
-  `CLOUD_PASSWORD`) used by every template unless its profile sets them.
+  defaults (`DISTRO_VER`, `DISK_STOR`, `NET_BRIDGE`, `VLAN`, `CI_USER`,
+  `CI_SSH_KEY`, `CI_PASSWORD`) used by every template unless its profile sets them.
   It holds secrets.
 
 `OUT_DIR` is the generated output (profiles and payloads, root-only). It
