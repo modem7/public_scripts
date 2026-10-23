@@ -14,7 +14,7 @@
 
 # --- Paths ---
 # PUBLIC_SCRIPT="/root/create-ubuntu-cloud-template.sh"   # downloaded if missing
-# OUT_DIR="/root/template-build"                          # generated files (root-only)
+# OUT_DIR="$SCRIPT_DIR/template-build"                    # generated files (root-only); default
 
 # --- Host defaults ---
 # Written into every profile first, so a profile can override any of them.
