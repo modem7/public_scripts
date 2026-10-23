@@ -27,8 +27,22 @@ Scripts for building Ubuntu cloud-init VM templates on a Proxmox host.
 
 ## Config for `build-templates.sh`
 
-Two kinds of file, both git-ignored (`*.conf`). Only the `.example` copies
+`./build-templates.sh --init` makes a config folder outside the git clone,
+so your secrets can't be committed by mistake and a `git pull` never
+touches them. The folder is `CONFIG_DIR`, default
+`~/.config/ubuntu-templates` (`/root/.config/ubuntu-templates` for root, or
+under `XDG_CONFIG_HOME` if set). `--init` copies `shared.conf.example` to
+`shared.conf` and each `profiles/*.conf.example` to `profiles/*.conf` in it.
+Folders are mode 700, files 600. A file that already exists is kept, never
+overwritten, so it is safe to run again. It needs no root, but the builder
+runs as root and reads root's folder, so run it as root (or set
+`CONFIG_DIR`).
+
+The old layout still works: `shared.conf` and `profiles/*.conf` next to the
+script, where they are git-ignored (`*.conf`). Only the `.example` copies
 are committed.
+
+Two kinds of file:
 
 - `profiles/<template>.conf`: the VM side of one template. Name, tags,
   packages, snapd, IPv6, tuned, unattended upgrades and, for the desktop,
@@ -58,26 +72,27 @@ Each generated `OUT_DIR/<template>.conf` is, in order:
    payloads need those, so editing a profile can't break them.
 
 `shared.conf` is found by `SHARED_CONF`, then `BUILD_CONF` (old name), then
-`shared.conf` next to the script, then the old `build-templates.conf` with a
-warning. Profiles are read from `PROFILES_DIR` (default `profiles/` next to
-the script). Each template you build needs its profile.
+`shared.conf` next to the script, then the old `build-templates.conf` next
+to the script with a warning, then `CONFIG_DIR/shared.conf`. The first one
+found is used, and the build says which. Profiles are read from
+`PROFILES_DIR`, default the `profiles/` folder next to that `shared.conf`.
+Each template you build needs its profile. With none found, the builder
+lists where it looked and points at `--init`.
 
 ## Usage
 
 Run as root on the Proxmox host.
 
 ```bash
-cp shared.conf.example shared.conf
-chmod 600 shared.conf
-nano shared.conf
-for t in base extras desktop; do cp "profiles/$t.conf.example" "profiles/$t.conf"; done
-nano profiles/extras.conf
-./build-templates.sh extras
+./build-templates.sh --init
+nano /root/.config/ubuntu-templates/shared.conf
+./build-templates.sh extras --verify
 ```
 
 Other forms:
 
 ```bash
+./build-templates.sh --init
 ./build-templates.sh base|extras|desktop|all
 ./build-templates.sh --generate-only
 ./build-templates.sh extras -- --unattended --vmid 52000 --auto-vmid --template
@@ -90,14 +105,15 @@ Other forms:
 and only work with `--verify`. All three go before `--`.
 
 `--help` (also `-h` or `help`) prints the full help and works without root,
-a config file or profiles.
+a config file or profiles. So does `--init`, which takes no other options.
 
 `--generate-only` writes the profiles and payloads without building anything.
 The default arguments passed to the generic script are
 `--unattended --vmid 52000 --auto-vmid --template`.
 
-`shared.conf` holds the mail password and SSH keys. It is git-ignored
-(`*.conf`). Never commit it.
+`shared.conf` holds the mail password and SSH keys. Keep it mode 600 and
+never commit it. The builder refuses the placeholder `ANSIBLE_SSH_PUBKEY`
+from the example.
 
 ### Moving from `build-templates.conf`
 

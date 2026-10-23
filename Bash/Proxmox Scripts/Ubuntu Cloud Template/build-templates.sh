@@ -7,7 +7,9 @@
 #  offline, by generating profiles + payload scripts and handing them to
 #  the public create-ubuntu-cloud-template.sh via --config.
 #
-#  Two kinds of config, both git-ignored (copy the .example files):
+#  Two kinds of config, in CONFIG_DIR (default ~/.config/ubuntu-templates,
+#  made by --init from the .example files) or, as before, next to this
+#  script (git-ignored):
 #    profiles/<t>.conf  VM settings per template: name, tags, packages,
 #                       snapd, IPv6, desktop, RAM, disk, ...
 #    shared.conf        settings for every template: mail, ansible,
@@ -20,6 +22,7 @@
 #    desktop  GNOME + RDP
 #
 #  Usage (as root, on the Proxmox host):
+#    ./build-templates.sh --init              # make CONFIG_DIR, no root needed
 #    ./build-templates.sh base|extras|desktop|all [-- <create-script args>]
 #    ./build-templates.sh extras --verify     # build, then verify-clone.sh it
 #      (--send-test-mail <addr> and --keep are passed on; only with --verify)
@@ -37,13 +40,14 @@ set -Eeuo pipefail
 
 # =============================================================================
 #  SETTINGS
-#  Your values live in shared.conf next to this script (or the file named
-#  by $SHARED_CONF). It is git-ignored: copy shared.conf.example to start.
-#  Anything not set there keeps the default below. Per-template VM settings
-#  live in profiles/<t>.conf, not here.
+#  Your values live in shared.conf (see SHARED CONFIG below for where it
+#  is looked for). Run --init to make one. Anything not set there keeps
+#  the default below. Per-template VM settings live in profiles/<t>.conf,
+#  not here.
 # =============================================================================
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROFILES_DIR="${PROFILES_DIR:-$SCRIPT_DIR/profiles}"
+CONFIG_DIR="${CONFIG_DIR:-${XDG_CONFIG_HOME:-${HOME:-/root}/.config}/ubuntu-templates}"
+PROFILES_DIR="${PROFILES_DIR:-}"   # blank = profiles next to shared.conf
 
 PUBLIC_SCRIPT="${PUBLIC_SCRIPT:-/root/create-ubuntu-cloud-template.sh}"   # refreshed from GitHub each run
 # Tried in order: the script's own folder (public_scripts #35), then where it
@@ -120,6 +124,7 @@ USAGE
   ./build-templates.sh base|extras|desktop|all [--verify [--keep]
                        [--send-test-mail <addr>]] [-- <create-script args>]
   ./build-templates.sh --generate-only
+  ./build-templates.sh --init
   ./build-templates.sh -h|--help|help
 
 ARGUMENTS
@@ -128,7 +133,13 @@ ARGUMENTS
   desktop           Build the desktop template.
   all               Build all three: base, extras, then desktop.
   --generate-only   Write all profiles and payloads to OUT_DIR. Build nothing.
-  --verify          After each template is built, run verify-clone.sh on
+  --init            Create CONFIG_DIR with shared.conf and profiles/*.conf
+                    copied from the .example files next to this script
+                    (folders 700, files 600). Existing files are kept,
+                    never overwritten. No root needed. Run it as the
+                    user that builds (root), or set CONFIG_DIR.
+                    Takes no target or other options.
+  --verify         After each template is built, run verify-clone.sh on
                     it with --profile <target> --config <shared.conf>.
                     A verify that fails or cannot run does not stop the
                     other targets, but the exit code is then 1. Not with
@@ -160,7 +171,9 @@ TEMPLATES
   the login shell, needrestart and Pro advert tweaks.
 
 CONFIG
-  Two kinds of file, both git-ignored. Copy the .example next to each.
+  Two kinds of file, made from the .example files by --init. They live
+  in CONFIG_DIR (default ~/.config/ubuntu-templates), outside the git
+  clone, or next to this script, where *.conf is git-ignored.
 
   profiles/<target>.conf (one per template, in PROFILES_DIR)
     VM settings, as for create-ubuntu-cloud-template.sh --config (see
@@ -173,10 +186,13 @@ CONFIG
 
   shared.conf (settings for every template)
     Looked up in this order: SHARED_CONF, BUILD_CONF, shared.conf next
-    to this script, then the old build-templates.conf (with a warning).
-    Unset keys keep their defaults. It holds secrets: chmod 600 it and
-    never commit it. PKGS_* and TAG_BASE are no longer read: set
-    EXTRA_VIRT_PKGS and TAG in the profiles.
+    to this script, the old build-templates.conf next to this script
+    (with a warning), then CONFIG_DIR/shared.conf. The first found is
+    used, and the profiles are read from the profiles folder next to it
+    (unless PROFILES_DIR is set). Unset keys keep their defaults. It
+    holds secrets: keep it mode 600 and never commit it. PKGS_* and
+    TAG_BASE are no longer read: set EXTRA_VIRT_PKGS and TAG in the
+    profiles.
 
   How OUT_DIR/<target>.conf is put together, in order:
     1. Host defaults from shared.conf (DISTRO_VER, DISK_STOR, NET_BRIDGE,
@@ -189,8 +205,9 @@ CONFIG
        EXTRA_VIRT_PKGS.
 
   shared.conf, required:
-    ANSIBLE_SSH_PUBKEY   Public key for the ansible user.
-    MAIL_DOMAIN          Mail is sent as user@<short hostname>.MAIL_DOMAIN.
+    ANSIBLE_SSH_PUBKEY   Public key for the ansible user. The example's
+                         placeholder is refused.
+    MAIL_DOMAIN         Mail is sent as user@<short hostname>.MAIL_DOMAIN.
 
   shared.conf, mail (default):
     MAIL_RELAY           gmail. One of:
@@ -235,11 +252,16 @@ CONFIG
     JOURNAL_MAX_PERCENT  10
 
 ENVIRONMENT
+  CONFIG_DIR             Config folder made by --init, and the last place
+                         shared.conf is looked for.
+                         Default: $XDG_CONFIG_HOME/ubuntu-templates, or
+                         ~/.config/ubuntu-templates (/root/.config/...
+                         for root)
   SHARED_CONF            Shared config file.
-                         Default: shared.conf next to this script
+                         Default: see the lookup order under CONFIG
   BUILD_CONF             Old name for SHARED_CONF, still read.
   PROFILES_DIR           Folder with the <target>.conf profiles.
-                         Default: profiles next to this script
+                         Default: profiles next to the shared.conf used
   PUBLIC_SCRIPT          Local copy of create-ubuntu-cloud-template.sh.
                          Default: /root/create-ubuntu-cloud-template.sh
   OUT_DIR                Where generated files go.
@@ -255,6 +277,7 @@ OUTPUT
   Both are root-only and rewritten on every run.
 
 EXAMPLES
+  ./build-templates.sh --init
   ./build-templates.sh --generate-only
   ./build-templates.sh extras
   ./build-templates.sh all
@@ -264,7 +287,8 @@ EXAMPLES
   PROFILES_DIR=/root/profiles ./build-templates.sh all
 
 NOTES
-  - Run as root on the Proxmox host, --generate-only included.
+  - Run as root on the Proxmox host, --generate-only included. Only
+    --init and --help work without root.
   - Each build downloads the latest create-ubuntu-cloud-template.sh from
     GitHub to PUBLIC_SCRIPT, falling back to the copy already there.
   - Each run downloads zram-to-zswap.sh from GitHub.
@@ -288,9 +312,10 @@ usage_error() { { echo "Error: $*"; echo; usage; } >&2; exit 1; }
 
 # The target and this script's own options come first. After the target,
 # the first other argument (or --) starts the create-script args.
-TARGET="" VERIFY=no TEST_MAIL="" KEEP=no
+TARGET="" VERIFY=no TEST_MAIL="" KEEP=no INIT=no
 while (( $# )); do
     case "$1" in
+        --init)   INIT=yes ;;
         --verify) VERIFY=yes ;;
         --keep)   KEEP=yes ;;
         --send-test-mail)
@@ -306,6 +331,11 @@ while (( $# )); do
     esac
     shift
 done
+if [[ "$INIT" == yes ]]; then
+    [[ -z "$TARGET" && "$VERIFY" == no && "$KEEP" == no && -z "$TEST_MAIL" && $# -eq 0 ]] \
+        || usage_error "--init takes no target or other options."
+    TARGET=--init
+fi
 [[ -n "$TARGET" ]] || usage_error "no target given."
 [[ "$VERIFY" == yes || -z "$TEST_MAIL" ]] || usage_error "--send-test-mail only works with --verify."
 [[ "$VERIFY" == yes || "$KEEP" == no ]] || usage_error "--keep only works with --verify."
@@ -319,9 +349,66 @@ warn() { echo -e "\033[0;33m[build]\033[0m $*" >&2; }
 die()  { echo -e "\033[0;31m[build]\033[0m $*" >&2; exit 1; }
 
 # =============================================================================
+#  INIT
+#  --init: copy the .example files from next to this script into
+#  CONFIG_DIR. Never overwrites a file. Needs no root and no config.
+# =============================================================================
+# Usage: init_copy <example> <dest>. Called with umask 077, so the copy
+# is never readable by others, even briefly.
+init_copy() {
+    if [[ -e "$2" || -L "$2" ]]; then
+        info "Kept existing $2"
+    else
+        cp -- "$1" "$2" || die "Could not write $2."
+        chmod 600 "$2"
+        info "Wrote $2"
+    fi
+}
+
+init_config() {
+    local src f d
+    [[ -f "$SCRIPT_DIR/shared.conf.example" ]] || die "Missing $SCRIPT_DIR/shared.conf.example."
+    umask 077
+    for d in "$CONFIG_DIR" "$CONFIG_DIR/profiles"; do
+        if [[ -d "$d" ]]; then
+            info "Kept existing $d/"
+        else
+            mkdir -p "$d" || die "Could not create $d."   # 700 by the umask
+            info "Created $d/"
+        fi
+    done
+    init_copy "$SCRIPT_DIR/shared.conf.example" "$CONFIG_DIR/shared.conf"
+    for src in "$SCRIPT_DIR"/profiles/*.conf.example; do
+        [[ -f "$src" ]] || { warn "No profiles/*.conf.example next to this script."; break; }
+        f="${src##*/}"
+        init_copy "$src" "$CONFIG_DIR/profiles/${f%.example}"
+    done
+    [[ ! -f "$SCRIPT_DIR/shared.conf" ]] \
+        || warn "$SCRIPT_DIR/shared.conf exists and is used before $CONFIG_DIR/shared.conf."
+    [[ $EUID -eq 0 ]] \
+        || warn "Builds run as root and read root's config folder: run --init as root, or set CONFIG_DIR."
+    cat <<EOF
+
+Next steps:
+  1. Edit $CONFIG_DIR/shared.conf
+     Required: ANSIBLE_SSH_PUBKEY, MAIL_DOMAIN and the mail settings
+     (MAIL_RELAY, MAIL_RELAY_USER, MAIL_RELAY_PASSWORD, ...).
+     See ./build-templates.sh --help for every setting.
+  2. Check the profiles in $CONFIG_DIR/profiles/
+  3. As root: ./build-templates.sh extras --verify
+EOF
+}
+
+if [[ "$TARGET" == --init ]]; then
+    init_config
+    exit 0
+fi
+
+# =============================================================================
 #  SHARED CONFIG
 #  SHARED_CONF, then BUILD_CONF (old name), then shared.conf here, then the
-#  old build-templates.conf. A file named by the environment must exist.
+#  old build-templates.conf here, then CONFIG_DIR/shared.conf. A file named
+#  by the environment must exist. Profiles are next to the one used.
 # =============================================================================
 if [[ -n "${SHARED_CONF:-}" ]]; then
     :
@@ -332,12 +419,20 @@ elif [[ -f "$SCRIPT_DIR/shared.conf" ]]; then
 elif [[ -f "$SCRIPT_DIR/build-templates.conf" ]]; then
     SHARED_CONF="$SCRIPT_DIR/build-templates.conf"
     warn "Using the old $SHARED_CONF: rename it to shared.conf."
+elif [[ -f "$CONFIG_DIR/shared.conf" ]]; then
+    SHARED_CONF="$CONFIG_DIR/shared.conf"
 else
-    SHARED_CONF="$SCRIPT_DIR/shared.conf"
+    die "No shared.conf found. Looked for:
+    $SCRIPT_DIR/shared.conf
+    $SCRIPT_DIR/build-templates.conf
+    $CONFIG_DIR/shared.conf
+  Run ./build-templates.sh --init to create $CONFIG_DIR, then edit it."
 fi
-[[ -f "$SHARED_CONF" ]] || die "Missing $SHARED_CONF (copy shared.conf.example)."
+[[ -f "$SHARED_CONF" ]] || die "Missing $SHARED_CONF (set by SHARED_CONF or BUILD_CONF)."
+[[ -n "$PROFILES_DIR" ]] || PROFILES_DIR="$(dirname "$SHARED_CONF")/profiles"
 # shellcheck source=/dev/null
 source "$SHARED_CONF"
+info "Config: $SHARED_CONF (profiles: $PROFILES_DIR)"
 
 # Settings that moved to the profiles. Ignored if still set.
 mapfile -t leftover < <(compgen -v PKGS_ || true)
@@ -776,7 +871,7 @@ check_profiles() {
     for t in base extras desktop; do
         want "$t" || continue
         src="$(profile_src "$t")"
-        [[ -f "$src" ]] || die "Missing profile $src (copy profiles/$t.conf.example to profiles/$t.conf and edit it)."
+        [[ -f "$src" ]] || die "Missing profile $src (run ./build-templates.sh --init, or copy profiles/$t.conf.example from next to this script to $src)."
         bash -n "$src" || die "Profile $src has a syntax error (see above)."
         grep -qE '^[[:space:]]*TEMPL_NAME_DEFAULT=' "$src" \
             || warn "$src does not set TEMPL_NAME_DEFAULT: the template gets the create script's default name."
@@ -803,7 +898,7 @@ check_mail() {
     if [[ "$MAIL_RELAY" != none ]] && placeholder_addr "$MAIL_RELAY_USER"; then
         die "MAIL_RELAY_USER is still the placeholder $MAIL_RELAY_USER: set your own login in $SHARED_CONF."
     fi
-    for v in MAIL_ROOT_TO MAIL_SENDER; do
+    for v in MAIL_ROOT_TO MAIL_SENDER UU_MAIL; do
         [[ -z "${!v}" || "${!v}" == *@* ]] || die "$v must be an email address."
         if placeholder_addr "${!v}"; then
             die "$v is still the placeholder ${!v}: set your own address in $SHARED_CONF."
@@ -836,6 +931,10 @@ generate() {
     for v in ANSIBLE_SSH_PUBKEY MAIL_DOMAIN; do
         [[ -n "${!v}" ]] || die "Set $v in $SHARED_CONF."
     done
+    [[ "$ANSIBLE_SSH_PUBKEY" != *"AAAA..."* ]] \
+        || die "ANSIBLE_SSH_PUBKEY is still the placeholder from shared.conf.example: set your ansible public key in $SHARED_CONF."
+    [[ "$DOTFILES_RAW" != *"<you>"* ]] \
+        || warn "DOTFILES_RAW still has the <you> placeholder: set your dotfiles URL (or blank it) in $SHARED_CONF."
     check_mail
     [[ -z "$JOURNAL_MAX_MB" || ( "$JOURNAL_MAX_MB" =~ ^[0-9]+$ && "$JOURNAL_MAX_PERCENT" =~ ^[0-9]+$ ) ]] \
         || die "JOURNAL_MAX_MB and JOURNAL_MAX_PERCENT must be numbers."
