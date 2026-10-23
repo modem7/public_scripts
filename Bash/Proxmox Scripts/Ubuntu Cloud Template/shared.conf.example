@@ -1,7 +1,9 @@
 # =============================================================================
 #  shared.conf  -  settings for every template built by build-templates.sh
-#  Copy to shared.conf and fill in. That file is git-ignored: it holds
-#  passwords and keys. Anything left out keeps the script default.
+#  ./build-templates.sh --init copies this to ~/.config/ubuntu-templates/
+#  shared.conf (outside the git clone). Or copy it to shared.conf next to
+#  the script: *.conf is git-ignored. It holds passwords and keys. Anything
+#  left out keeps the script default.
 #
 #  Per-template VM settings (name, tags, packages, snapd, IPv6, desktop,
 #  RAM, disk) are not here: they live in profiles/<template>.conf.

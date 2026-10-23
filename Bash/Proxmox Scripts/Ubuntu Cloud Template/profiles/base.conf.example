@@ -1,6 +1,8 @@
 # =============================================================================
 #  profiles/base.conf  -  the base template: a server
-#  Copy to profiles/base.conf and edit. That file is git-ignored.
+#  ./build-templates.sh --init copies this to profiles/base.conf in your config
+#  folder (next to shared.conf). Or copy it to profiles/base.conf next to the
+#  script: *.conf is git-ignored.
 #
 #  A plain create-ubuntu-cloud-template.sh profile (see profile.conf.example
 #  for every key). build-templates.sh puts the host defaults from shared.conf

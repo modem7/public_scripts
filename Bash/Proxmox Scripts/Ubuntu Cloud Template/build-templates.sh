@@ -933,6 +933,10 @@ generate() {
     done
     [[ "$ANSIBLE_SSH_PUBKEY" != *"AAAA..."* ]] \
         || die "ANSIBLE_SSH_PUBKEY is still the placeholder from shared.conf.example: set your ansible public key in $SHARED_CONF."
+    [[ "$CI_SSH_KEY" != *"<your-github-user>"* ]] \
+        || die "CI_SSH_KEY still has the <your-github-user> placeholder: set your key or GitHub user (or blank it) in $SHARED_CONF."
+    [[ ! "$WAKATIME_CFG" =~ api_key[[:space:]]*=[[:space:]]*x+[[:space:]]*$ ]] \
+        || die "WAKATIME_CFG still has the xxxxxxxx api_key placeholder: set your key (or blank WAKATIME_CFG) in $SHARED_CONF."
     [[ "$DOTFILES_RAW" != *"<you>"* ]] \
         || warn "DOTFILES_RAW still has the <you> placeholder: set your dotfiles URL (or blank it) in $SHARED_CONF."
     check_mail
