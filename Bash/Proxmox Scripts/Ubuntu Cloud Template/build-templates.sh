@@ -186,7 +186,8 @@ CONFIG
     MAIL_RELAY_HOST      custom only: host name or IPv4 address.
     MAIL_RELAY_PORT      custom only: 587 (STARTTLS, required), 465
                          (TLS from the start), or 25 or any other
-                         port (TLS if offered).
+                         port (TLS required if there is a login,
+                         otherwise TLS if offered).
     MAIL_RELAY_USER      SMTP login. Required for gmail. For custom,
                          blank = no login (an internal relay).
     MAIL_RELAY_PASSWORD  Password for that login (Gmail: an app
@@ -363,7 +364,9 @@ write_postfix_payload() {
         case "$MAIL_RELAY_PORT" in
             587) pc+=('"smtp_tls_security_level=encrypt"') ;;
             465) pc+=('"smtp_tls_security_level=encrypt"' '"smtp_tls_wrappermode=yes"') ;;
-            *)   pc+=('"smtp_tls_security_level=may"') ;;
+            *)   # With a login, never fall back to plain text.
+                 if relay_login; then pc+=('"smtp_tls_security_level=encrypt"')
+                 else pc+=('"smtp_tls_security_level=may"'); fi ;;
         esac
         pc+=('"smtp_tls_CAfile=/etc/ssl/certs/ca-certificates.crt"')
     fi

@@ -115,7 +115,7 @@ Each clone sends mail through the relay chosen by `MAIL_RELAY` in
 | `MAIL_RELAY` | What it does |
 | --- | --- |
 | `gmail` (default) | `[smtp.gmail.com]:587` with `MAIL_RELAY_USER` and a Gmail app password in `MAIL_RELAY_PASSWORD`. The only one tested. |
-| `custom` | Your own relay: `MAIL_RELAY_HOST` and `MAIL_RELAY_PORT`. Port 587 uses STARTTLS (required), 465 uses TLS from the start, anything else (such as 25) uses TLS if offered. A blank `MAIL_RELAY_USER` means no login, for an internal relay. |
+| `custom` | Your own relay: `MAIL_RELAY_HOST` and `MAIL_RELAY_PORT`. Port 587 uses STARTTLS (required), 465 uses TLS from the start, anything else (such as 25) requires TLS when there is a login and uses it if offered otherwise. A blank `MAIL_RELAY_USER` means no login, for an internal relay. |
 | `none` | No relay. Mail stays on the clone, and anything addressed outside it bounces. |
 
 Other settings: `MAIL_ROOT_TO` (where root's mail goes; defaults to
