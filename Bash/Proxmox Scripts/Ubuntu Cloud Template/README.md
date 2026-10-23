@@ -40,6 +40,11 @@ are committed.
   `CLOUD_PASSWORD`) used by every template unless its profile sets them.
   It holds secrets.
 
+`OUT_DIR` is the generated output (profiles and payloads, root-only). It
+defaults to `template-build/` next to the script, which is git-ignored. Set
+`OUT_DIR` in `shared.conf` or the environment to put it elsewhere. Before
+this default it was `/root/template-build`.
+
 Each generated `OUT_DIR/<template>.conf` is, in order:
 
 1. The host defaults from `shared.conf` (`CI_SSH_KEY` becomes `SSH_KEY`).
