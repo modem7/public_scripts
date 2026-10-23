@@ -346,6 +346,8 @@ postconf -e \
     'mydestination=$myhostname, localhost.$mydomain, localhost' \
     "maximal_queue_lifetime=1d" \
     "bounce_queue_lifetime=1d"
+# "Local only" sets these to error, which bounces every outgoing mail.
+postconf -X default_transport relay_transport
 
 # Root's local mail (bounces, users' cron jobs) goes to Gmail.
 grep -q '^root:' /etc/aliases 2>/dev/null || printf 'root: %s\n' "$GMAIL_USER" >> /etc/aliases

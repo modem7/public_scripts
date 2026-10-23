@@ -266,6 +266,9 @@ for k in sender_canonical_maps smtp_header_checks; do
     v="$(pc "$k")"
     [[ -z "$v" ]] && pass "$k unset (no sender rewrite)" || fail "$k = '$v', expected unset"
 done
+v="$(postconf -n 2>/dev/null | grep -E '^(default|relay)_transport =')"
+[[ -z "$v" ]] && pass "default_transport and relay_transport unset (outgoing mail allowed)" \
+              || fail "outgoing mail blocked: ${v//$'\n'/; }"
 check "root mail aliased (root: line in /etc/aliases)" grep -q '^root:' /etc/aliases
 grep -qE "^root:[[:space:]]*${EXPECT_GMAIL_USER}[[:space:]]*$" /etc/aliases 2>/dev/null \
     && pass "root mail goes to $EXPECT_GMAIL_USER" || warn "root: alias in /etc/aliases is not $EXPECT_GMAIL_USER"
