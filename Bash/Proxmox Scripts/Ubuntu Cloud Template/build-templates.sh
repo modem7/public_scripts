@@ -23,6 +23,7 @@
 #
 #  Usage (as root, on the Proxmox host):
 #    ./build-templates.sh --init              # make CONFIG_DIR, no root needed
+#      (existing files kept; new settings appended, commented out)
 #    ./build-templates.sh base|extras|desktop|all [-- <create-script args>]
 #    ./build-templates.sh extras --verify     # build, then verify-clone.sh it
 #      (--send-test-mail <addr> and --keep are passed on; only with --verify)
@@ -138,7 +139,9 @@ ARGUMENTS
   --init            Create CONFIG_DIR with shared.conf and profiles/*.conf
                     copied from the .example files next to this script
                     (folders 700, files 600). Existing files are kept,
-                    never overwritten. No root needed. Run it as the
+                    never overwritten or edited, except that settings
+                    new in the .example files are appended to them,
+                    commented out. No root needed. Run it as the
                     user that builds (root), or set CONFIG_DIR.
                     Takes no target or other options.
   --verify         After each template is built, run verify-clone.sh on
@@ -357,13 +360,61 @@ die()  { echo -e "\033[0;31m[build]\033[0m $*" >&2; exit 1; }
 # =============================================================================
 #  INIT
 #  --init: copy the .example files from next to this script into
-#  CONFIG_DIR. Never overwrites a file. Needs no root and no config.
+#  CONFIG_DIR. Never overwrites a file: an existing one only gets the
+#  example's new settings appended, commented out. Needs no root and no
+#  config.
 # =============================================================================
-# Usage: init_copy <example> <dest>. Called with umask 077, so the copy
-# is never readable by others, even briefly.
-init_copy() {
-    if [[ -e "$2" || -L "$2" ]]; then
+# Usage: init_add_missing <example> <dest>. Appends each setting the example
+# has and dest lacks (even commented out) to dest, commented out, under a
+# dated heading. Settings spanning several lines are only named. Writes
+# nothing if nothing is missing.
+init_add_missing() {
+    local line key list last added=() long=()
+    if [[ ! -r "$2" || ! -w "$2" ]]; then
+        warn "Cannot read or write $2: not checked for new settings."
+        return 0
+    fi
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        [[ "$line" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]] || continue
+        key="${line%%=*}"
+        if grep -Eq "^[[:space:]]*#?[[:space:]]*${key}=" -- "$2"; then
+            continue
+        fi
+        # bash -n fails on an unclosed quote or ( : the value goes on.
+        if bash -n <<<"$line" 2>/dev/null; then
+            added+=("$line")
+        else
+            long+=("$key")
+        fi
+    done < "$1"
+    if (( ${#added[@]} )); then
+        # Last byte, empty if it is a newline: then no newline is needed.
+        last="$(tail -c 1 -- "$2")"
+        {
+            [[ -z "$last" ]] || echo
+            echo
+            echo "# --- Added by --init on $(date +%F): new settings, commented out; enable what you need ---"
+            printf '# %s\n' "${added[@]}"
+        } >> "$2" || die "Could not append to $2."
+        printf -v list '%s, ' "${added[@]%%=*}"
+        info "Added ${#added[@]} new setting(s) to $2 (commented out): ${list%, }"
+    else
         info "Kept existing $2"
+    fi
+    if (( ${#long[@]} )); then
+        printf -v list '%s, ' "${long[@]}"
+        warn "$2 lacks ${list%, }, which spans several lines: copy it from $1."
+    fi
+}
+
+# Usage: init_copy <example> <dest>. Called with umask 077, so the copy
+# is never readable by others, even briefly. Symlinks and anything not a
+# regular file are left alone.
+init_copy() {
+    if [[ -L "$2" || ( -e "$2" && ! -f "$2" ) ]]; then
+        info "Kept existing $2"
+    elif [[ -f "$2" ]]; then
+        init_add_missing "$1" "$2"
     else
         cp -- "$1" "$2" || die "Could not write $2."
         chmod 600 "$2"
@@ -402,6 +453,7 @@ Next steps:
      See ./build-templates.sh --help for every setting.
   2. Check the profiles in $CONFIG_DIR/profiles/
   3. As root: ./build-templates.sh extras --verify
+  New settings added to existing files are at the end, commented out.
 EOF
 }
 
