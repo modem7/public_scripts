@@ -6,7 +6,7 @@
 #
 #  A plain create-ubuntu-cloud-template.sh profile (see profile.conf.example
 #  for every key). build-templates.sh puts the host defaults from shared.conf
-#  (DISTRO_VER, DISK_STOR, NET_BRIDGE, VLAN, CLOUD_USER_DEFAULT, SSH_KEY, CLOUD_PASSWORD) before
+#  (DISTRO_VER, DISK_STOR, NET_BRIDGE, VLAN, CLOUD_USER_DEFAULT, SSH_KEY, CLOUD_PASSWORD from CI_PASSWORD) before
 #  it, so anything set here wins. It then appends the payloads, plus any of
 #  libsasl2-modules, unattended-upgrades and zsh missing from EXTRA_VIRT_PKGS.
 #  No secrets here: they belong in shared.conf.

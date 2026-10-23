@@ -29,7 +29,7 @@ NET_BRIDGE="vmbr0"
 VLAN=""                # blank = no VLAN tag
 CI_USER="ubuntu"                             # cloud-init login name
 CI_SSH_KEY="github.com/<your-github-user>"   # cloud-init user's key(s), or the key itself
-CLOUD_PASSWORD=""                            # blank = generated each build
+CI_PASSWORD=""                               # blank = generated each build
 
 # --- Ansible user (required) ---
 ANSIBLE_SSH_PUBKEY="ssh-ed25519 AAAA... ansible"

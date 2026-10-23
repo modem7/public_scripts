@@ -102,7 +102,7 @@ Two kinds of file:
   key, mail relay, unattended upgrades mail, dotfiles, WakaTime, login
   shell, needrestart, Pro adverts and the journald cap. Also a block of host
   defaults (`DISTRO_VER`, `DISK_STOR`, `NET_BRIDGE`, `VLAN`, `CI_USER`,
-  `CI_SSH_KEY`, `CLOUD_PASSWORD`) used by every template unless its profile sets them.
+  `CI_SSH_KEY`, `CI_PASSWORD`) used by every template unless its profile sets them.
   It holds secrets.
 
 `OUT_DIR` is the generated output (profiles and payloads, root-only). It

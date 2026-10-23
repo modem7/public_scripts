@@ -67,7 +67,8 @@ NET_BRIDGE="vmbr0"
 VLAN=""
 CI_USER="ubuntu"                   # cloud-init login name; written as CLOUD_USER_DEFAULT
 CI_SSH_KEY=""                      # cloud-init user's key(s), or "github.com/<user>"; written as SSH_KEY
-CLOUD_PASSWORD=""                  # blank = generated each build, shown at the end
+CI_PASSWORD=""                     # blank = generated each build, shown at the end
+CLOUD_PASSWORD=""                  # old name for CI_PASSWORD
 
 ANSIBLE_SSH_PUBKEY=""              # required
 
@@ -198,7 +199,7 @@ CONFIG
   How OUT_DIR/<target>.conf is put together, in order:
     1. Host defaults from shared.conf (DISTRO_VER, DISK_STOR, NET_BRIDGE,
        VLAN, CI_USER as CLOUD_USER_DEFAULT, CI_SSH_KEY as SSH_KEY,
-       CLOUD_PASSWORD if set).
+       CI_PASSWORD as CLOUD_PASSWORD if set).
     2. profiles/<target>.conf as it is, so it can override step 1.
        Override the SSH key there with SSH_KEY and the login with
        CLOUD_USER_DEFAULT, not CI_SSH_KEY / CI_USER.
@@ -234,6 +235,7 @@ CONFIG
                          this address (some relays need it).
     GMAIL_USER and GMAIL_APP_PASSWORD are still read as the old names
     for MAIL_RELAY_USER and MAIL_RELAY_PASSWORD, with a warning.
+    CLOUD_PASSWORD is still read as the old name for CI_PASSWORD, with a warning.
 
   shared.conf, host defaults (default):
     DISTRO_VER           resolute
@@ -242,7 +244,7 @@ CONFIG
     VLAN                 blank
     CI_USER              ubuntu (cloud-init login name)
     CI_SSH_KEY           blank (key(s), or github.com/<user>)
-    CLOUD_PASSWORD       blank = generated each build, shown at the end
+    CI_PASSWORD          blank = generated each build, shown at the end
 
   shared.conf, optional (default):
     UU_MAIL              blank = no unattended-upgrades mail
@@ -446,6 +448,10 @@ mapfile -t leftover < <(compgen -v PKGS_ || true)
 unset leftover
 
 # Mail: old Gmail names, relay presets, root alias. Checked in generate().
+if [[ -n "$CLOUD_PASSWORD" ]]; then
+    warn "CLOUD_PASSWORD is an old name: rename it to CI_PASSWORD in $SHARED_CONF."
+    [[ -n "$CI_PASSWORD" ]] || CI_PASSWORD="$CLOUD_PASSWORD"
+fi
 if [[ -n "$GMAIL_USER" || -n "$GMAIL_APP_PASSWORD" ]]; then
     warn "GMAIL_USER / GMAIL_APP_PASSWORD are old names: rename them to MAIL_RELAY_USER / MAIL_RELAY_PASSWORD in $SHARED_CONF."
     [[ -n "$MAIL_RELAY_USER" ]] || MAIL_RELAY_USER="$GMAIL_USER"
@@ -833,7 +839,7 @@ NET_BRIDGE=$(q "$NET_BRIDGE")
 VLAN=$(q "$VLAN")
 CLOUD_USER_DEFAULT=$(q "$CI_USER")
 SSH_KEY=$(q "$CI_SSH_KEY")
-$( [[ -n "$CLOUD_PASSWORD" ]] && echo "CLOUD_PASSWORD=$(q "$CLOUD_PASSWORD")" )
+$( [[ -n "$CI_PASSWORD" ]] && echo "CLOUD_PASSWORD=$(q "$CI_PASSWORD")" )
 
 # --- Profile: $src ---
 EOF
