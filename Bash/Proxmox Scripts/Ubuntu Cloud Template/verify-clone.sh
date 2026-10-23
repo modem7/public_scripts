@@ -27,6 +27,7 @@ set +x
 #  QM, PVESH and the poll timings can be overridden so a mock can be used.
 # =============================================================================
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CONFIG_DIR="${CONFIG_DIR:-${XDG_CONFIG_HOME:-${HOME:-/root}/.config}/ubuntu-templates}"   # as build-templates.sh
 QM="${QM:-qm}"
 PVESH="${PVESH:-pvesh}"
 POLL_INTERVAL="${POLL_INTERVAL:-3}"
@@ -63,7 +64,8 @@ ARGUMENTS
                             (not with MAIL_RELAY=none: mail stays local).
   --config <path>           shared.conf to read. Default: SHARED_CONF,
                             then BUILD_CONF, then shared.conf next to
-                            this script.
+                            this script, then CONFIG_DIR/shared.conf
+                            (default ~/.config/ubuntu-templates).
   --vmid <id>               VMID for the clone. Must not exist yet.
                             Default: the next free one (pvesh nextid).
   --full                    Full clone. Default: linked clone.
@@ -103,7 +105,7 @@ SHARED.CONF
   ANSIBLE_SSH_PUBKEY, LOGIN_SHELL, NEEDRESTART_MODE, JOURNAL_MAX_MB and
   JOURNAL_MAX_PERCENT. No password or other secret is read out or sent.
   A file named by --config, SHARED_CONF or BUILD_CONF must exist. With no
-  shared.conf next to this script, verify-template.sh's defaults apply.
+  shared.conf in any of those places, verify-template.sh's defaults apply.
 
 NOTES
   - Run as root on the Proxmox host.
@@ -230,6 +232,7 @@ if [[ -n "$CONFIG" ]]; then              CONF_FILE="$CONFIG"
 elif [[ -n "${SHARED_CONF:-}" ]]; then   CONF_FILE="$SHARED_CONF"
 elif [[ -n "${BUILD_CONF:-}" ]]; then    CONF_FILE="$BUILD_CONF"
 elif [[ -f "$SCRIPT_DIR/shared.conf" ]]; then CONF_FILE="$SCRIPT_DIR/shared.conf"
+elif [[ -f "$CONFIG_DIR/shared.conf" ]]; then CONF_FILE="$CONFIG_DIR/shared.conf"
 else                                     CONF_FILE=""; fi
 
 conf_env=() RELAY=""
