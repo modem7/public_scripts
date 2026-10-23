@@ -13,25 +13,35 @@
 #    --send-test-mail  Also sends the postfix test email (the one manual step).
 #
 #  Exit code: 0 = no FAILs (WARNs are fine), 1 = at least one FAIL.
-#  Holds no secrets: it checks the Gmail password is set, never what it is.
+#  Holds no secrets: it checks the relay password is set, never what it is.
+#
+#  verify-clone.sh passes the shared.conf values as VERIFY_* variables.
+#  Run by hand, the defaults below are used. Set but empty = that setting
+#  is off (checked as off, or SKIP).
 # =============================================================================
 set -uo pipefail
 
 # --- What the templates are meant to have (match shared.conf and profiles/*.conf) ---
+# ${VERIFY_x-default}: an empty VERIFY_x is kept (the setting is off).
 EXPECT_LANG="en_GB.UTF-8"
 EXPECT_TZ="Europe/London"
 EXPECT_KEYMAP="gb"
-EXPECT_MAIL_DOMAIN="modem7.com"
-EXPECT_GMAIL_USER="modem7@gmail.com"
-EXPECT_UU_MAIL="modem7@gmail.com"
-EXPECT_ANSIBLE_KEY="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFv+XL86DUoq1o4EEC24uYecv4nU76XcmTeOO1rin9gx ansible"
-EXPECT_SHELL="/usr/bin/zsh"
-EXPECT_NEEDRESTART="a"
-EXPECT_JOURNAL_MAX_MB=1024
-EXPECT_JOURNAL_PERCENT=10
+EXPECT_MAIL_DOMAIN="${VERIFY_MAIL_DOMAIN-modem7.com}"
+EXPECT_RELAY="${VERIFY_MAIL_RELAY-gmail}"                 # gmail, custom or none
+EXPECT_RELAY_HOST="${VERIFY_RELAY_HOST-smtp.gmail.com}"
+EXPECT_RELAY_PORT="${VERIFY_RELAY_PORT-587}"
+EXPECT_RELAY_USER="${VERIFY_RELAY_USER-modem7@gmail.com}"   # empty = no relay login
+EXPECT_ROOT_TO="${VERIFY_ROOT_TO-modem7@gmail.com}"         # empty = no root alias
+EXPECT_SENDER="${VERIFY_MAIL_SENDER-}"                      # empty = no sender rewrite
+EXPECT_UU_MAIL="${VERIFY_UU_MAIL-modem7@gmail.com}"         # empty = no upgrade mail
+EXPECT_ANSIBLE_KEY="${VERIFY_ANSIBLE_KEY-ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFv+XL86DUoq1o4EEC24uYecv4nU76XcmTeOO1rin9gx ansible}"
+EXPECT_SHELL="${VERIFY_SHELL-/usr/bin/zsh}"                 # empty = left as bash
+EXPECT_NEEDRESTART="${VERIFY_NEEDRESTART-a}"                # empty = OS default
+EXPECT_JOURNAL_MAX_MB="${VERIFY_JOURNAL_MAX_MB-1024}"       # empty = OS default
+EXPECT_JOURNAL_PERCENT="${VERIFY_JOURNAL_PERCENT-10}"
 EXPECT_TUNED="virtual-guest"
 
-PKGS_CORE="aptitude auto-apt-proxy libsasl2-modules tuned tuned-utils unattended-upgrades zsh
+PKGS_CORE="aptitude auto-apt-proxy tuned tuned-utils unattended-upgrades zsh
            qemu-guest-agent cloud-init cloud-utils cloud-guest-utils postfix bsd-mailx"
 PKGS_TOOLS="acl bind9-dnsutils cifs-utils curl git htop needrestart net-tools plocate unzip"
 PKGS_DESKTOP="ubuntu-desktop-minimal gnome-remote-desktop openssl"
@@ -45,17 +55,30 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --profile)        PROFILE="${2:-}"; shift 2 ;;
         --send-test-mail) TEST_MAIL="${2:-}"; shift 2 ;;
-        -h|--help)        sed -n '2,16p' "$0"; exit 0 ;;
+        -h|--help)        sed -n '2,20p' "$0"; exit 0 ;;
         *) echo "Unknown argument: $1" >&2; exit 2 ;;
     esac
 done
+[[ "$EXPECT_RELAY" =~ ^(gmail|custom|none)$ ]] \
+    || { echo "VERIFY_MAIL_RELAY must be gmail, custom or none, not '$EXPECT_RELAY'." >&2; exit 2; }
+# Checked as numbers: they go into $(( )).
+[[ "$EXPECT_JOURNAL_MAX_MB" =~ ^[0-9]*$ && "$EXPECT_JOURNAL_PERCENT" =~ ^[0-9]+$ ]] \
+    || { echo "VERIFY_JOURNAL_MAX_MB and VERIFY_JOURNAL_PERCENT must be whole numbers." >&2; exit 2; }
 [[ $EUID -eq 0 ]] || { echo "Run as root (sudo $0)." >&2; exit 2; }
+
+# The relay logs in (SASL) only with a user, as in build-templates.sh.
+RELAY_LOGIN=0
+[[ "$EXPECT_RELAY" != none && -n "$EXPECT_RELAY_USER" ]] && RELAY_LOGIN=1
+(( RELAY_LOGIN )) && PKGS_CORE+=" libsasl2-modules"
+LOGIN_NAME="relay login"
+[[ "$EXPECT_RELAY" == gmail ]] && LOGIN_NAME="Gmail login"
 
 if [[ -t 1 ]]; then G='\033[0;32m' Y='\033[1;33m' R='\033[0;31m' B='\033[1m' N='\033[0m'; else G='' Y='' R='' B='' N=''; fi
 PASSES=0 WARNS=0 FAILS=0
 pass()    { echo -e "  ${G}PASS${N}  $*"; PASSES=$((PASSES + 1)); }
 warn()    { echo -e "  ${Y}WARN${N}  $*"; WARNS=$((WARNS + 1)); }
 fail()    { echo -e "  ${R}FAIL${N}  $*"; FAILS=$((FAILS + 1)); }
+skip()    { echo -e "  SKIP  $*"; }   # not counted: the setting is off on purpose
 section() { echo -e "\n${B}== $* ==${N}"; }
 # check "<description>" <command...>   PASS if the command succeeds
 check()   { local d="$1"; shift; if "$@" &>/dev/null; then pass "$d"; else fail "$d"; fi; }
@@ -89,6 +112,11 @@ fi
 
 echo -e "${B}Template check: $(hostname) - profile: ${PROFILE}${AUTO}${N}"
 echo "Login user: ${LOGIN_USER:-(none found)}   Kernel: $(uname -r)"
+if [[ "${VERIFY_FROM_CONFIG:-}" == 1 ]]; then
+    echo "Expected values: from shared.conf (mail relay: $EXPECT_RELAY)"
+else
+    echo "Expected values: built-in defaults or VERIFY_* (mail relay: $EXPECT_RELAY)"
+fi
 
 # =============================================================================
 section "First boot"
@@ -247,10 +275,30 @@ check "postfix running" systemctl is-active --quiet postfix
 check "postfix config valid (postfix check)" postfix check
 pc() { postconf -h "$1" 2>/dev/null; }
 expect_pc() { local v; v="$(pc "$1")"; [[ "$v" == "$2" ]] && pass "$1 = $v" || fail "$1 = '$v', expected '$2'"; }
-expect_pc relayhost "[smtp.gmail.com]:587"
-expect_pc smtp_tls_security_level encrypt
-expect_pc smtp_sasl_auth_enable yes
-expect_pc smtp_sasl_security_options noanonymous
+if [[ "$EXPECT_RELAY" == none ]]; then
+    v="$(pc relayhost)"
+    [[ -z "$v" ]] && pass "relayhost unset: no relay (MAIL_RELAY=none), mail stays local" \
+                  || fail "relayhost = '$v', expected unset (MAIL_RELAY=none)"
+else
+    expect_pc relayhost "[$EXPECT_RELAY_HOST]:$EXPECT_RELAY_PORT"
+    # TLS as build-templates.sh sets it: required on 587, 465 or with a login.
+    if [[ "$EXPECT_RELAY_PORT" == 465 ]]; then
+        expect_pc smtp_tls_security_level encrypt
+        expect_pc smtp_tls_wrappermode yes
+    elif [[ "$EXPECT_RELAY_PORT" == 587 ]] || (( RELAY_LOGIN )); then
+        expect_pc smtp_tls_security_level encrypt
+    else
+        expect_pc smtp_tls_security_level may
+    fi
+    if (( RELAY_LOGIN )); then
+        expect_pc smtp_sasl_auth_enable yes
+        expect_pc smtp_sasl_security_options noanonymous
+    else
+        v="$(pc smtp_sasl_auth_enable)"
+        [[ "$v" != yes ]] && pass "smtp_sasl_auth_enable = ${v:-unset} (no relay login)" \
+                          || fail "smtp_sasl_auth_enable = yes, but no relay login is expected"
+    fi
+fi
 expect_pc inet_interfaces loopback-only
 expect_pc inet_protocols ipv4
 expect_pc mydomain "$EXPECT_MAIL_DOMAIN"
@@ -261,28 +309,53 @@ expect_pc myhostname "$fqdn"
 expect_pc myorigin /etc/mailname
 expect_pc maximal_queue_lifetime 1d
 expect_pc bounce_queue_lifetime 1d
-# No sender rewrite: mail goes out as the natural user@<fqdn>.
-for k in sender_canonical_maps smtp_header_checks; do
+# Sender rewrite only with MAIL_SENDER; else mail goes out as the natural user@<fqdn>.
+unset_keys="sender_canonical_maps smtp_header_checks" why="no sender rewrite"
+if [[ -n "$EXPECT_SENDER" ]]; then
+    expect_pc sender_canonical_maps "static:$EXPECT_SENDER"
+    expect_pc sender_canonical_classes "envelope_sender, header_sender"
+    unset_keys="smtp_header_checks" why="no header rewrite"
+fi
+for k in $unset_keys; do
     v="$(pc "$k")"
-    [[ -z "$v" ]] && pass "$k unset (no sender rewrite)" || fail "$k = '$v', expected unset"
+    [[ -z "$v" ]] && pass "$k unset ($why)" || fail "$k = '$v', expected unset"
 done
-v="$(postconf -n 2>/dev/null | grep -E '^(default|relay)_transport =')"
-[[ -z "$v" ]] && pass "default_transport and relay_transport unset (outgoing mail allowed)" \
-              || fail "outgoing mail blocked: ${v//$'\n'/; }"
-check "root mail aliased (root: line in /etc/aliases)" grep -q '^root:' /etc/aliases
-grep -qE "^root:[[:space:]]*${EXPECT_GMAIL_USER}[[:space:]]*$" /etc/aliases 2>/dev/null \
-    && pass "root mail goes to $EXPECT_GMAIL_USER" || warn "root: alias in /etc/aliases is not $EXPECT_GMAIL_USER"
+if [[ "$EXPECT_RELAY" == none ]]; then
+    skip "default_transport and relay_transport stay as Local only set them (MAIL_RELAY=none)"
+else
+    v="$(postconf -n 2>/dev/null | grep -E '^(default|relay)_transport =')"
+    [[ -z "$v" ]] && pass "default_transport and relay_transport unset (outgoing mail allowed)" \
+                  || fail "outgoing mail blocked: ${v//$'\n'/; }"
+fi
+if [[ -n "$EXPECT_ROOT_TO" ]]; then
+    check "root mail aliased (root: line in /etc/aliases)" grep -q '^root:' /etc/aliases
+    sed -n 's/^root:[[:space:]]*\(.*[^[:space:]]\)[[:space:]]*$/\1/p' /etc/aliases 2>/dev/null | grep -qxF -- "$EXPECT_ROOT_TO" \
+        && pass "root mail goes to $EXPECT_ROOT_TO" || warn "root: alias in /etc/aliases is not $EXPECT_ROOT_TO"
+else
+    skip "root mail alias (no MAIL_ROOT_TO)"
+fi
 check 'no cron mail from /etc/crontab (MAILTO="")' grep -qx 'MAILTO=""' /etc/crontab
 sp=/etc/postfix/sasl/sasl_passwd
-if [[ -f "$sp" ]]; then
-    grep -q "^\[smtp.gmail.com\]:587 ${EXPECT_GMAIL_USER}:." "$sp" && pass "Gmail login set for $EXPECT_GMAIL_USER (password not shown)" \
-                                                                 || fail "sasl_passwd has no login for $EXPECT_GMAIL_USER"
-    [[ "$(mode_of "$sp")" == 600 ]] && pass "sasl_passwd is 600" || fail "sasl_passwd mode is $(mode_of "$sp"), expected 600"
-    ls "$sp".* &>/dev/null && pass "sasl_passwd map built ($(basename "$(ls "$sp".* | head -1)"))" || fail "sasl_passwd map not built (postmap)"
-else
-    fail "$sp missing"
+if (( RELAY_LOGIN )); then
+    if [[ -f "$sp" ]]; then
+        # The line must start with "[host]:port user:" and have a password after it.
+        awk -v p="[$EXPECT_RELAY_HOST]:$EXPECT_RELAY_PORT $EXPECT_RELAY_USER:" \
+            'index($0, p) == 1 && length($0) > length(p) { f = 1 } END { exit !f }' "$sp" \
+            && pass "$LOGIN_NAME set for $EXPECT_RELAY_USER (password not shown)" \
+            || fail "sasl_passwd has no login for $EXPECT_RELAY_USER"
+        [[ "$(mode_of "$sp")" == 600 ]] && pass "sasl_passwd is 600" || fail "sasl_passwd mode is $(mode_of "$sp"), expected 600"
+        ls "$sp".* &>/dev/null && pass "sasl_passwd map built ($(basename "$(ls "$sp".* | head -1)"))" || fail "sasl_passwd map not built (postmap)"
+    else
+        fail "$sp missing"
+    fi
 fi
-if [[ -n "$TEST_MAIL" ]]; then
+if [[ "$EXPECT_RELAY" == none ]]; then
+    if [[ -n "$TEST_MAIL" ]]; then
+        warn "test email not sent to $TEST_MAIL: MAIL_RELAY=none keeps mail on this clone"
+    else
+        skip "test email (MAIL_RELAY=none keeps mail on this clone)"
+    fi
+elif [[ -n "$TEST_MAIL" ]]; then
     echo "Template check from $(hostname) at $(date)" | mail -s "Template check: $(hostname)" "$TEST_MAIL" \
         && pass "test email queued to $TEST_MAIL: check your inbox (and: journalctl -u postfix)" \
         || fail "could not queue the test email"
@@ -298,8 +371,14 @@ check "unattended-upgrades service enabled" systemctl is-enabled --quiet unatten
 [[ "$(uu_conf APT::Periodic::AutocleanInterval)" == 7 ]] && pass "autoclean every 7 days" || fail "AutocleanInterval is not 7"
 r="$(uu_conf Unattended-Upgrade::Automatic-Reboot)"
 [[ "$r" != true ]] && pass "no automatic reboot" || fail "automatic reboot is on (should be off)"
-[[ "$(uu_conf Unattended-Upgrade::Mail)" == "$EXPECT_UU_MAIL" ]] && pass "upgrade reports mailed to $EXPECT_UU_MAIL" || fail "Unattended-Upgrade::Mail is not $EXPECT_UU_MAIL"
-[[ "$(uu_conf Unattended-Upgrade::MailReport)" == on-change ]] && pass "MailReport on-change" || fail "MailReport is not on-change"
+if [[ -n "$EXPECT_UU_MAIL" ]]; then
+    [[ "$(uu_conf Unattended-Upgrade::Mail)" == "$EXPECT_UU_MAIL" ]] && pass "upgrade reports mailed to $EXPECT_UU_MAIL" || fail "Unattended-Upgrade::Mail is not $EXPECT_UU_MAIL"
+    [[ "$(uu_conf Unattended-Upgrade::MailReport)" == on-change ]] && pass "MailReport on-change" || fail "MailReport is not on-change"
+else
+    # UU_MAIL blank: the builder writes neither Mail nor MailReport.
+    v="$(uu_conf Unattended-Upgrade::Mail)"
+    [[ -z "$v" ]] && pass "no upgrade report mail (UU_MAIL blank)" || fail "Unattended-Upgrade::Mail is '$v', expected unset (UU_MAIL blank)"
+fi
 [[ "$(uu_conf Unattended-Upgrade::Remove-Unused-Dependencies)" == true ]] && pass "Remove-Unused-Dependencies true" || fail "Remove-Unused-Dependencies not true"
 origins="$(apt-config dump 2>/dev/null)"
 missing=()
@@ -326,26 +405,42 @@ fi
 if [[ "$LOGIN_USER" == root ]]; then
     warn "login user is root (Cloud-Init tab): shell, sudo and dotfile checks skipped; set a normal user there to test them"
 elif [[ -n "$LOGIN_USER" ]]; then
-    [[ "$(getent passwd "$LOGIN_USER" | cut -d: -f7)" == "$EXPECT_SHELL" ]] \
-        && pass "login user $LOGIN_USER uses $EXPECT_SHELL" || fail "login user $LOGIN_USER does not use $EXPECT_SHELL"
+    if [[ -n "$EXPECT_SHELL" ]]; then
+        [[ "$(getent passwd "$LOGIN_USER" | cut -d: -f7)" == "$EXPECT_SHELL" ]] \
+            && pass "login user $LOGIN_USER uses $EXPECT_SHELL" || fail "login user $LOGIN_USER does not use $EXPECT_SHELL"
+    else
+        skip "login user's shell (LOGIN_SHELL blank)"
+    fi
     id -nG "$LOGIN_USER" | grep -qw sudo && pass "$LOGIN_USER is in the sudo group" || fail "$LOGIN_USER is not in the sudo group"
     [[ -s "/home/$LOGIN_USER/.zshrc" ]] && pass "$LOGIN_USER got the dotfiles from /etc/skel" || warn "$LOGIN_USER has no ~/.zshrc"
 fi
-grep -q "^DSHELL=$EXPECT_SHELL" /etc/adduser.conf && pass "adduser default shell $EXPECT_SHELL" || fail "adduser default shell is not $EXPECT_SHELL"
-grep -q "^SHELL=$EXPECT_SHELL" /etc/default/useradd && pass "useradd default shell $EXPECT_SHELL" || fail "useradd default shell is not $EXPECT_SHELL"
+if [[ -n "$EXPECT_SHELL" ]]; then
+    grep -q "^DSHELL=$EXPECT_SHELL" /etc/adduser.conf && pass "adduser default shell $EXPECT_SHELL" || fail "adduser default shell is not $EXPECT_SHELL"
+    grep -q "^SHELL=$EXPECT_SHELL" /etc/default/useradd && pass "useradd default shell $EXPECT_SHELL" || fail "useradd default shell is not $EXPECT_SHELL"
+else
+    skip "adduser and useradd default shell (LOGIN_SHELL blank: OS default)"
+fi
 
 # =============================================================================
 section "needrestart, adverts, journal"
-grep -q "\$nrconf{restart} = '$EXPECT_NEEDRESTART';" /etc/needrestart/conf.d/50-restart-mode.conf 2>/dev/null \
-    && pass "needrestart restart mode '$EXPECT_NEEDRESTART'" || fail "needrestart restart mode not '$EXPECT_NEEDRESTART'"
+if [[ -n "$EXPECT_NEEDRESTART" ]]; then
+    grep -q "\$nrconf{restart} = '$EXPECT_NEEDRESTART';" /etc/needrestart/conf.d/50-restart-mode.conf 2>/dev/null \
+        && pass "needrestart restart mode '$EXPECT_NEEDRESTART'" || fail "needrestart restart mode not '$EXPECT_NEEDRESTART'"
+else
+    skip "needrestart restart mode (NEEDRESTART_MODE blank: OS default)"
+fi
 [[ ! -e /etc/apt/apt.conf.d/20apt-esm-hook.conf ]] && pass "apt Pro/ESM hook disabled" || fail "apt Pro/ESM hook still active"
 grep -q '^ENABLED=0' /etc/default/motd-news 2>/dev/null && pass "motd news off" || fail "motd news still on"
 [[ ! -x /etc/update-motd.d/91-contract-ua-esm-status ]] && pass "Pro status removed from the login message" || fail "Pro status still in the login message"
-cap="$(sed -n 's/^SystemMaxUse=\([0-9]*\)M$/\1/p' /etc/systemd/journald.conf.d/50-size.conf 2>/dev/null)"
-fs_mb=$(( $(df --output=size -k /var/log | tail -1) / 1024 ))
-want_cap=$(( fs_mb * EXPECT_JOURNAL_PERCENT / 100 )); (( want_cap > EXPECT_JOURNAL_MAX_MB )) && want_cap=$EXPECT_JOURNAL_MAX_MB
-[[ "$cap" == "$want_cap" ]] && pass "journal capped at ${cap}M (min ${EXPECT_JOURNAL_MAX_MB}M, ${EXPECT_JOURNAL_PERCENT}% of ${fs_mb}M)" \
-                            || fail "journal cap is '${cap:-unset}', expected ${want_cap}M"
+if [[ -n "$EXPECT_JOURNAL_MAX_MB" ]]; then
+    cap="$(sed -n 's/^SystemMaxUse=\([0-9]*\)M$/\1/p' /etc/systemd/journald.conf.d/50-size.conf 2>/dev/null)"
+    fs_mb=$(( $(df --output=size -k /var/log | tail -1) / 1024 ))
+    want_cap=$(( fs_mb * EXPECT_JOURNAL_PERCENT / 100 )); (( want_cap > EXPECT_JOURNAL_MAX_MB )) && want_cap=$EXPECT_JOURNAL_MAX_MB
+    [[ "$cap" == "$want_cap" ]] && pass "journal capped at ${cap}M (min ${EXPECT_JOURNAL_MAX_MB}M, ${EXPECT_JOURNAL_PERCENT}% of ${fs_mb}M)" \
+                                || fail "journal cap is '${cap:-unset}', expected ${want_cap}M"
+else
+    skip "journal cap (JOURNAL_MAX_MB blank: OS default)"
+fi
 echo "        journal now uses: $(journalctl --disk-usage 2>/dev/null | grep -o '[0-9.]*[KMG]' | head -1)"
 
 # =============================================================================
