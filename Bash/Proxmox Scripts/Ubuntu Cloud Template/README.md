@@ -115,7 +115,7 @@ Each clone sends mail through the relay chosen by `MAIL_RELAY` in
 | `MAIL_RELAY` | What it does |
 | --- | --- |
 | `gmail` (default) | `[smtp.gmail.com]:587` with `MAIL_RELAY_USER` and a Gmail app password in `MAIL_RELAY_PASSWORD`. The only one tested. |
-| `custom` | Your own relay: `MAIL_RELAY_HOST` and `MAIL_RELAY_PORT`. Port 587 uses STARTTLS (required), 465 uses TLS from the start, anything else (such as 25) uses TLS if offered. A blank `MAIL_RELAY_USER` means no login, for an internal relay. |
+| `custom` | Your own relay: `MAIL_RELAY_HOST` and `MAIL_RELAY_PORT`. Port 587 uses STARTTLS (required), 465 uses TLS from the start. Any other port (such as 25) requires TLS when there is a login, and uses TLS if offered when there is none. A blank `MAIL_RELAY_USER` means no login, for an internal relay. |
 | `none` | No relay. Mail stays on the clone, and anything addressed outside it bounces. |
 
 Other settings: `MAIL_ROOT_TO` (where root's mail goes; defaults to
@@ -128,13 +128,9 @@ placeholder values from `shared.conf.example`.
 `GMAIL_USER` and `GMAIL_APP_PASSWORD` still work as the old names for
 `MAIL_RELAY_USER` and `MAIL_RELAY_PASSWORD`, with a warning.
 
-`verify-template.sh` and `verify-clone.sh` still expect the Gmail relay, so
-for `custom` or `none` expect FAILs in their mail section until they read
-`shared.conf`.
-
 - The brackets stop MX lookups.
-- IPv4 only, TLS where the relay supports it, and queued mail expires after
-  one day, so a failure defers and drops instead of looping.
+- IPv4 only, TLS (required on 587, 465 or with a login), and queued mail
+  expires after one day, so a failure defers and drops instead of looping.
 - A per-boot script sets `/etc/mailname` and `myhostname` from the clone's own
   hostname plus `MAIL_DOMAIN`, so clones never keep the template's name.
 - Mail is sent as the natural `user@hostname.domain`. There is no sender or
@@ -160,7 +156,9 @@ Options (see `--help` for all of them):
 
 - `--profile` and `--send-test-mail <address>` are passed to
   `verify-template.sh`. With the mail option the script also waits up to 60
-  seconds for Postfix to log `status=sent` for that address.
+  seconds for Postfix to log `status=sent` for that address. With
+  `MAIL_RELAY=none` it does not wait (mail stays on the clone).
+- `--config <path>`: the `shared.conf` to read (see below).
 - `--vmid <id>`: VMID for the clone. Default: the next free one. A VMID that
   already exists is refused.
 - `--full [--storage <name>]`: full clone. Default is a linked clone, which
@@ -168,6 +166,16 @@ Options (see `--help` for all of them):
 - `--keep`: leave the clone running instead of destroying it.
 - `--timeout <secs>` and `--verify-timeout <secs>`: waits for the agent and
   cloud-init (default 300), and for the verify run (default 600).
+
+What to expect comes from `shared.conf`, found as `build-templates.sh` finds
+it: `--config`, then `SHARED_CONF`, then `BUILD_CONF`, then `shared.conf` next
+to the script. A file named by one of the first three must exist. The file is
+read in a subshell, and only non-secret settings go to the guest, as
+`VERIFY_*` variables: the mail relay, host, port and login name, `MAIL_ROOT_TO`,
+`MAIL_SENDER`, `MAIL_DOMAIN`, `UU_MAIL`, the ansible key, `LOGIN_SHELL`,
+`NEEDRESTART_MODE` and the journal cap. The relay password and the other
+secrets are never read out or sent. With no `shared.conf` found, it says so and
+`verify-template.sh` uses its built-in defaults.
 
 The template needs `qemu-guest-agent` installed and the VM option `agent=1`.
 The clone is destroyed on success, failure and Ctrl-C. Only a VM this run
@@ -191,9 +199,11 @@ Options:
 
 The exit code is 0 when there are no FAILs (warnings are fine).
 
-`verify-template.sh` has the values it expects (domain, Gmail user, SSH key,
-time zone and so on) at the top. Edit them to match your `shared.conf` and
-profiles.
+Run by hand, `verify-template.sh` uses the values at its top (mail relay,
+domain, relay login, SSH key, time zone and so on). Edit them to match your
+`shared.conf` and profiles, or use `verify-clone.sh`, which passes them from
+`shared.conf`. Settings left blank in `shared.conf` (no relay login, no
+`UU_MAIL`, no `LOGIN_SHELL` and so on) are shown as `SKIP` or checked as off.
 
 ## Manual steps
 

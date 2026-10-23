@@ -7,6 +7,10 @@
 #  it, boots the clone, waits for the guest agent and cloud-init, runs
 #  verify-template.sh inside it through the agent, then destroys the clone.
 #
+#  The values to expect come from shared.conf (found as build-templates.sh
+#  finds it). Only non-secret settings are passed to the guest, never a
+#  password. No shared.conf: verify-template.sh's own defaults are used.
+#
 #  Usage (as root, on the Proxmox host):
 #    ./verify-clone.sh <template-vmid> [options]
 #    ./verify-clone.sh --help              # full help, no root needed
@@ -42,6 +46,9 @@ Clones the template, starts the clone, waits for the guest agent and for
 cloud-init to finish, runs verify-template.sh inside it through the guest
 agent, prints the result, then destroys the clone.
 
+What to expect (mail relay, domain, ansible key, shell, and so on) is
+read from shared.conf, so the check matches what the builder made.
+
 USAGE
   ./verify-clone.sh <template-vmid> [options]
   ./verify-clone.sh -h|--help|help
@@ -52,7 +59,11 @@ ARGUMENTS
                             verify-template.sh. Default: it works it out.
   --send-test-mail <addr>   Passed to verify-template.sh, which sends a
                             test mail. This script then waits up to 60s
-                            for Postfix to log status=sent for it.
+                            for Postfix to log status=sent for it
+                            (not with MAIL_RELAY=none: mail stays local).
+  --config <path>           shared.conf to read. Default: SHARED_CONF,
+                            then BUILD_CONF, then shared.conf next to
+                            this script.
   --vmid <id>               VMID for the clone. Must not exist yet.
                             Default: the next free one (pvesh nextid).
   --full                    Full clone. Default: linked clone.
@@ -82,6 +93,17 @@ EXAMPLES
   ./verify-clone.sh 9002 --send-test-mail you@example.com
   ./verify-clone.sh 9002 --full --storage local-lvm --vmid 9101
   ./verify-clone.sh 9002 --keep
+  ./verify-clone.sh 9002 --config /root/other.conf
+
+SHARED.CONF
+  Read the same way as build-templates.sh, with the same defaults and
+  old names (GMAIL_USER). Only these are passed to the guest, as VERIFY_*
+  variables: MAIL_RELAY, MAIL_RELAY_HOST, MAIL_RELAY_PORT,
+  MAIL_RELAY_USER, MAIL_ROOT_TO, MAIL_SENDER, MAIL_DOMAIN, UU_MAIL,
+  ANSIBLE_SSH_PUBKEY, LOGIN_SHELL, NEEDRESTART_MODE, JOURNAL_MAX_MB and
+  JOURNAL_MAX_PERCENT. No password or other secret is read out or sent.
+  A file named by --config, SHARED_CONF or BUILD_CONF must exist. With no
+  shared.conf next to this script, verify-template.sh's defaults apply.
 
 NOTES
   - Run as root on the Proxmox host.
@@ -97,7 +119,7 @@ EOF
 # =============================================================================
 #  ARGUMENTS
 # =============================================================================
-TEMPLATE="" PROFILE="" TEST_MAIL="" NEWID="" FULL=0 STORAGE="" KEEP=0
+TEMPLATE="" PROFILE="" TEST_MAIL="" NEWID="" FULL=0 STORAGE="" KEEP=0 CONFIG=""
 TIMEOUT=300 VERIFY_TIMEOUT=600 VERIFY_SCRIPT="$SCRIPT_DIR/verify-template.sh"
 
 usage_error() { { echo "Error: $*"; echo "Run ./verify-clone.sh --help for usage."; } >&2; exit 2; }
@@ -115,6 +137,7 @@ while [[ $# -gt 0 ]]; do
         --timeout)        need_val "$@"; TIMEOUT="$2"; shift 2 ;;
         --verify-timeout) need_val "$@"; VERIFY_TIMEOUT="$2"; shift 2 ;;
         --script)         need_val "$@"; VERIFY_SCRIPT="$2"; shift 2 ;;
+        --config)         need_val "$@"; CONFIG="$2"; shift 2 ;;
         -*)               usage_error "unknown option: $1" ;;
         *)  [[ -z "$TEMPLATE" ]] || usage_error "more than one template VMID given."
             TEMPLATE="$1"; shift ;;
@@ -157,6 +180,73 @@ grep -q '^#  verify-template.sh$' "$VERIFY_SCRIPT" \
     || die "$VERIFY_SCRIPT is not verify-template.sh (its header does not name it). Wrong file or name?" 2
 size=$(stat -c %s "$VERIFY_SCRIPT")
 (( size <= MAX_STDIN )) || die "$VERIFY_SCRIPT is $size bytes: qm guest exec takes at most $MAX_STDIN on stdin." 2
+
+# =============================================================================
+#  SHARED CONFIG
+#  Found as build-templates.sh finds it (the old build-templates.conf is not
+#  looked for). Sourced in a subshell that prints only the allow-listed,
+#  non-secret values, NUL-separated: no password reaches this shell, the
+#  qm command line or the guest.
+# =============================================================================
+read_conf() {   # <file>: prints VERIFY_x=value NUL ..., ending with VERIFY_FROM_CONFIG=1
+    (
+        set +u
+        # The builder's defaults, so a setting left out means the same here.
+        MAIL_RELAY="gmail" MAIL_RELAY_HOST="" MAIL_RELAY_PORT="" MAIL_RELAY_USER=""
+        MAIL_ROOT_TO="" MAIL_SENDER="" MAIL_DOMAIN="" GMAIL_USER="" UU_MAIL=""
+        ANSIBLE_SSH_PUBKEY="" LOGIN_SHELL="/usr/bin/zsh" NEEDRESTART_MODE="a"
+        JOURNAL_MAX_MB="1024" JOURNAL_MAX_PERCENT="10"
+        # shellcheck source=/dev/null
+        source "$1" >/dev/null 2>&1
+        unset MAIL_RELAY_PASSWORD GMAIL_APP_PASSWORD CLOUD_PASSWORD WAKATIME_CFG
+        # Old name, relay preset and root alias, as in build-templates.sh.
+        [[ -n "$MAIL_RELAY_USER" ]] || MAIL_RELAY_USER="$GMAIL_USER"
+        MAIL_RELAY="${MAIL_RELAY:-gmail}"
+        [[ "$MAIL_RELAY" == gmail ]] && { MAIL_RELAY_HOST="smtp.gmail.com"; MAIL_RELAY_PORT="587"; }
+        if [[ "$MAIL_RELAY" != none && -z "$MAIL_ROOT_TO" && "$MAIL_RELAY_USER" == *@* ]]; then
+            MAIL_ROOT_TO="$MAIL_RELAY_USER"
+        fi
+        # if_set: blank = verify-template.sh's default. always: blank = "off".
+        if_set() { [[ -z "$2" ]] || printf '%s=%s\0' "$1" "$2"; }
+        always() { printf '%s=%s\0' "$1" "$2"; }
+        always VERIFY_MAIL_RELAY      "$MAIL_RELAY"
+        if_set VERIFY_RELAY_HOST      "$MAIL_RELAY_HOST"
+        if_set VERIFY_RELAY_PORT      "$MAIL_RELAY_PORT"
+        always VERIFY_RELAY_USER      "$MAIL_RELAY_USER"
+        always VERIFY_ROOT_TO         "$MAIL_ROOT_TO"
+        always VERIFY_MAIL_SENDER     "$MAIL_SENDER"
+        if_set VERIFY_MAIL_DOMAIN     "$MAIL_DOMAIN"
+        always VERIFY_UU_MAIL         "$UU_MAIL"
+        if_set VERIFY_ANSIBLE_KEY     "$ANSIBLE_SSH_PUBKEY"
+        always VERIFY_SHELL           "$LOGIN_SHELL"
+        always VERIFY_NEEDRESTART     "$NEEDRESTART_MODE"
+        always VERIFY_JOURNAL_MAX_MB  "$JOURNAL_MAX_MB"
+        if_set VERIFY_JOURNAL_PERCENT "$JOURNAL_MAX_PERCENT"
+        printf 'VERIFY_FROM_CONFIG=1\0'
+    )
+}
+
+if [[ -n "$CONFIG" ]]; then              CONF_FILE="$CONFIG"
+elif [[ -n "${SHARED_CONF:-}" ]]; then   CONF_FILE="$SHARED_CONF"
+elif [[ -n "${BUILD_CONF:-}" ]]; then    CONF_FILE="$BUILD_CONF"
+elif [[ -f "$SCRIPT_DIR/shared.conf" ]]; then CONF_FILE="$SCRIPT_DIR/shared.conf"
+else                                     CONF_FILE=""; fi
+
+conf_env=() RELAY=""
+if [[ -n "$CONF_FILE" ]]; then
+    [[ -f "$CONF_FILE" && -r "$CONF_FILE" ]] || die "shared.conf not found or not readable: $CONF_FILE" 2
+    # Output dropped: an error message could quote a line holding a password.
+    bash -n "$CONF_FILE" &>/dev/null || die "$CONF_FILE has a syntax error (check it with: bash -n)." 2
+    mapfile -d '' -t conf_env < <(read_conf "$CONF_FILE")
+    (( ${#conf_env[@]} )) && [[ "${conf_env[-1]}" == VERIFY_FROM_CONFIG=1 ]] \
+        || die "could not read $CONF_FILE." 2
+    for kv in "${conf_env[@]}"; do [[ "$kv" == VERIFY_MAIL_RELAY=* ]] && RELAY="${kv#*=}"; done
+    [[ "$RELAY" =~ ^(gmail|custom|none)$ ]] \
+        || die "MAIL_RELAY in $CONF_FILE must be gmail, custom or none, not '$RELAY'." 2
+    info "Expected values from $CONF_FILE (non-secret settings only)"
+else
+    info "No shared.conf found: verify-template.sh's built-in defaults apply (or use --config <path>)."
+fi
 
 tpl_conf="$("$QM" config "$TEMPLATE" 2>&1)" || die "VM $TEMPLATE not found: $tpl_conf" 2
 grep -qx 'template: 1' <<< "$tpl_conf" || die "VM $TEMPLATE is not a template." 2
@@ -329,16 +419,22 @@ esac
 verify_args=()
 [[ -n "$PROFILE" ]]   && verify_args+=(--profile "$PROFILE")
 [[ -n "$TEST_MAIL" ]] && verify_args+=(--send-test-mail "$TEST_MAIL")
+# The expected values go in as env arguments: qm passes each one as its
+# own argument, so no shell quoting is involved.
+guest_cmd=(/bin/bash -s -- "${verify_args[@]}")
+(( ${#conf_env[@]} )) && guest_cmd=(env "${conf_env[@]}" "${guest_cmd[@]}")
 
 info "Running $(basename "$VERIFY_SCRIPT") in $NEWID (up to ${VERIFY_TIMEOUT}s)"
 echo -e "${B}----- guest output -----${N}"
-guest_exec "$NEWID" "$VERIFY_TIMEOUT" "$VERIFY_SCRIPT" -- /bin/bash -s -- "${verify_args[@]}"
+guest_exec "$NEWID" "$VERIFY_TIMEOUT" "$VERIFY_SCRIPT" -- "${guest_cmd[@]}"
 RC=$?
 echo -e "${B}----- end of guest output -----${N}"
 (( RC == 5 )) && exit 5
 
 # Postfix sends in the background: wait for the relay's verdict.
-if [[ -n "$TEST_MAIL" ]]; then
+if [[ -n "$TEST_MAIL" && "$RELAY" == none ]]; then
+    echo -e "  ${Y}WARN${N}  not waiting for the test mail: MAIL_RELAY=none keeps mail on the clone"
+elif [[ -n "$TEST_MAIL" ]]; then
     info "Waiting for Postfix to relay the test mail (up to ${MAIL_WAIT}s)"
     mail_deadline=$((SECONDS + MAIL_WAIT))
     while :; do
