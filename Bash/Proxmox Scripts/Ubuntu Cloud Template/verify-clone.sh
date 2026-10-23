@@ -153,6 +153,8 @@ elif command -v jq >/dev/null; then JSON=jq
 else die "Need python3 or jq to read qm's output." 2; fi
 
 [[ -f "$VERIFY_SCRIPT" ]] || die "verify script not found: $VERIFY_SCRIPT (use --script <path>)." 2
+grep -q '^#  verify-template.sh$' "$VERIFY_SCRIPT" \
+    || die "$VERIFY_SCRIPT is not verify-template.sh (its header does not name it). Wrong file or name?" 2
 size=$(stat -c %s "$VERIFY_SCRIPT")
 (( size <= MAX_STDIN )) || die "$VERIFY_SCRIPT is $size bytes: qm guest exec takes at most $MAX_STDIN on stdin." 2
 
