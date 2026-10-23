@@ -2,6 +2,55 @@
 
 Scripts for building Ubuntu cloud-init VM templates on a Proxmox host.
 
+## Quick start
+
+Run as root on the Proxmox host. It needs `git` and internet access (the Ubuntu
+cloud image and a few scripts are downloaded on each build).
+
+1. Get the scripts:
+
+   ```bash
+   git clone --depth 1 https://github.com/modem7/public_scripts.git
+   cd "public_scripts/Bash/Proxmox Scripts/Ubuntu Cloud Template"
+   ```
+
+2. Create your config. This makes `~/.config/ubuntu-templates/` (outside the
+   clone, so a `git pull` or a stray `git add` can never touch your secrets)
+   with `shared.conf` and a profile per template, all readable by you only:
+
+   ```bash
+   ./build-templates.sh --init
+   ```
+
+3. Edit `~/.config/ubuntu-templates/shared.conf`. At least:
+   - `ANSIBLE_SSH_PUBKEY`: the public key for the `ansible` user.
+   - `MAIL_DOMAIN` and the mail settings. `MAIL_RELAY` is `gmail`, `custom`
+     (your own SMTP server) or `none` (no mail leaves the VM). See
+     [Mail on clones](#mail-on-clones).
+   - Go through the rest of the file too: set or blank `CI_SSH_KEY`,
+     `DOTFILES_RAW` and `WAKATIME_CFG` (they hold example values), and adjust
+     the VM sizes in `profiles/*.conf` if you like.
+
+   The builder refuses to run while the Ansible key, the mail domain or the
+   mail addresses are still the examples.
+
+4. Build a template and check it:
+
+   ```bash
+   ./build-templates.sh extras --verify --send-test-mail you@example.com
+   ```
+
+   This builds the `extras` template, then clones it, boots the clone, runs the
+   checks inside it, prints the result and removes the clone. The test mail is
+   optional and not sent with `MAIL_RELAY=none`. Use `base`, `desktop` or `all`
+   instead of `extras`, and add `--keep` to leave the clone for a look around.
+
+5. Clone the template in Proxmox as usual, set the user, password and SSH key
+   on the Cloud-Init tab, and start it.
+
+To update, run `git pull` in the clone and build again. `./build-templates.sh
+--help` lists every option and setting.
+
 ## Files
 
 - `create-ubuntu-cloud-template.sh`: the generic builder. Downloads an Ubuntu
