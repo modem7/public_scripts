@@ -21,6 +21,8 @@
 #
 #  Usage (as root, on the Proxmox host):
 #    ./build-templates.sh base|extras|desktop|all [-- <create-script args>]
+#    ./build-templates.sh extras --verify     # build, then verify-clone.sh it
+#      (--send-test-mail <addr> and --keep are passed on; only with --verify)
 #    ./build-templates.sh --generate-only     # write files, don't build
 #    ./build-templates.sh --help              # full help, no root needed
 #
@@ -52,6 +54,7 @@ PUBLIC_SCRIPT_URLS=(
 )
 ZSWAP_SCRIPT_URL="https://raw.githubusercontent.com/modem7/public_scripts/master/Bash/Server%20scripts/zram-to-zswap.sh"
 OUT_DIR="${OUT_DIR:-$SCRIPT_DIR/template-build}"     # generated profiles + payloads (root-only)
+VERIFY_CLONE="${VERIFY_CLONE:-$SCRIPT_DIR/verify-clone.sh}"   # run by --verify
 
 # --- Host defaults: written into every profile, which can override them ---
 DISTRO_VER="resolute"
@@ -114,7 +117,8 @@ extras, desktop), then runs create-ubuntu-cloud-template.sh --config
 and your profiles/<target>.conf.
 
 USAGE
-  ./build-templates.sh base|extras|desktop|all [-- <create-script args>]
+  ./build-templates.sh base|extras|desktop|all [--verify [--keep]
+                       [--send-test-mail <addr>]] [-- <create-script args>]
   ./build-templates.sh --generate-only
   ./build-templates.sh -h|--help|help
 
@@ -124,6 +128,16 @@ ARGUMENTS
   desktop           Build the desktop template.
   all               Build all three: base, extras, then desktop.
   --generate-only   Write all profiles and payloads to OUT_DIR. Build nothing.
+  --verify          After each template is built, run verify-clone.sh on
+                    it with --profile <target> --config <shared.conf>.
+                    A verify that fails or cannot run does not stop the
+                    other targets, but the exit code is then 1. Not with
+                    --generate-only.
+  --send-test-mail <addr>
+                    Passed to verify-clone.sh. Only with --verify.
+  --keep            Passed to verify-clone.sh: each verify clone is left
+                    running, and its VMID is shown in the summary. Only
+                    with --verify.
   -- <args>         Passed as they are to create-ubuntu-cloud-template.sh.
                     Default: --unattended --vmid 52000 --auto-vmid --template
                     Any args given replace the whole default list, e.g.
@@ -231,6 +245,9 @@ ENVIRONMENT
   OUT_DIR                Where generated files go.
                          Default: template-build next to this script
   UPDATE_PUBLIC_SCRIPT   no = keep the local PUBLIC_SCRIPT. Default: yes
+  VERIFY_CLONE           verify-clone.sh run by --verify. verify-template.sh
+                         must be next to it.
+                         Default: verify-clone.sh next to this script
 
 OUTPUT
   OUT_DIR/<target>.conf  Profile for each chosen template.
@@ -241,6 +258,7 @@ EXAMPLES
   ./build-templates.sh --generate-only
   ./build-templates.sh extras
   ./build-templates.sh all
+  ./build-templates.sh all --verify --send-test-mail you@example.com
   ./build-templates.sh base -- --unattended --vmid 53000 --auto-vmid --template
   SHARED_CONF=/root/other.conf ./build-templates.sh desktop
   PROFILES_DIR=/root/profiles ./build-templates.sh all
@@ -250,6 +268,14 @@ NOTES
   - Each build downloads the latest create-ubuntu-cloud-template.sh from
     GitHub to PUBLIC_SCRIPT, falling back to the copy already there.
   - Each run downloads zram-to-zswap.sh from GitHub.
+  - --verify clones each finished template, boots the clone, runs the
+    checks in it and removes the clone. The template needs the guest
+    agent. It takes a few minutes per template. The new template's VMID
+    is the one VMID in qm list after the build that was not there
+    before; if there is not exactly one, that verify is skipped and
+    counts as failed.
+  - Clones kept by --keep stay running until you remove them by hand:
+    qm destroy <clone-vmid> --purge
   - Still manual, on the first clone of each template:
       sudo ./verify-template.sh --send-test-mail <address>
     (from a copy inside the clone), check the test mail arrived, and on
@@ -258,12 +284,34 @@ NOTES
 EOF
 }
 
-case "${1:-}" in
-    -h|--help|help) usage; exit 0 ;;
-    base|extras|desktop|all|--generate-only) ;;
-    "") { echo "Error: no target given."; echo; usage; } >&2; exit 1 ;;
-    *)  { echo "Error: unknown target: $1"; echo; usage; } >&2; exit 1 ;;
-esac
+usage_error() { { echo "Error: $*"; echo; usage; } >&2; exit 1; }
+
+# The target and this script's own options come first. After the target,
+# the first other argument (or --) starts the create-script args.
+TARGET="" VERIFY=no TEST_MAIL="" KEEP=no
+while (( $# )); do
+    case "$1" in
+        --verify) VERIFY=yes ;;
+        --keep)   KEEP=yes ;;
+        --send-test-mail)
+            [[ -n "${2:-}" ]] || usage_error "--send-test-mail needs an address."
+            TEST_MAIL="$2"; shift ;;
+        *)  [[ -z "$TARGET" ]] || break
+            case "$1" in
+                -h|--help|help) usage; exit 0 ;;
+                base|extras|desktop|all|--generate-only) TARGET="$1" ;;
+                "") usage_error "no target given." ;;
+                *)  usage_error "unknown target: $1" ;;
+            esac ;;
+    esac
+    shift
+done
+[[ -n "$TARGET" ]] || usage_error "no target given."
+[[ "$VERIFY" == yes || -z "$TEST_MAIL" ]] || usage_error "--send-test-mail only works with --verify."
+[[ "$VERIFY" == yes || "$KEEP" == no ]] || usage_error "--keep only works with --verify."
+[[ "$VERIFY" == no || "$TARGET" != --generate-only ]] || usage_error "--verify does not work with --generate-only."
+[[ "${1:-}" == "--" ]] && shift
+CREATE_ARGS=("$@")
 
 # =============================================================================
 info() { echo -e "\033[0;36m[build]\033[0m $*"; }
@@ -819,10 +867,6 @@ generate() {
 # =============================================================================
 #  MAIN
 # =============================================================================
-TARGET="${1:-}"
-[[ $# -gt 0 ]] && shift
-[[ "${1:-}" == "--" ]] && shift
-CREATE_ARGS=("$@")
 (( ${#CREATE_ARGS[@]} )) || CREATE_ARGS=(--unattended --vmid 52000 --auto-vmid --template)
 
 case "$TARGET" in
@@ -833,6 +877,13 @@ case "$TARGET" in
 esac
 
 [[ $EUID -eq 0 ]] || die "Run as root."
+# Checked before anything is built, so a long build is not wasted.
+if [[ "$VERIFY" == yes ]]; then
+    for f in "$VERIFY_CLONE" "$(dirname "$VERIFY_CLONE")/verify-template.sh"; do
+        [[ -f "$f" && -r "$f" ]] || die "--verify needs $f (missing or not readable)."
+    done
+    command -v qm >/dev/null || die "--verify needs qm (run on the Proxmox host)."
+fi
 [[ -v GENERATE ]] || GENERATE=("${PROFILES[@]}")
 generate
 (( ${#PROFILES[@]} )) || { info "Files written to $OUT_DIR. Nothing built."; exit 0; }
@@ -859,7 +910,79 @@ if [[ "${UPDATE_PUBLIC_SCRIPT:-yes}" == "yes" ]]; then
 fi
 [[ -f "$PUBLIC_SCRIPT" ]] || die "$PUBLIC_SCRIPT not found (UPDATE_PUBLIC_SCRIPT=no)."
 
+# VMIDs on this node, sorted. qm list: a header, then the VMID first.
+list_vmids() { qm list | awk '$1 ~ /^[0-9]+$/ { print $1 }' | sort; }
+
+# --verify results, one "target|vmid|kept clone|result" each, and the summary.
+RESULTS=()
+VERIFY_FAILED=no
+summary() {
+    local r t id kept res
+    info "Verify summary:"
+    printf '  %-8s %-7s %-11s %s\n' TARGET VMID "KEPT CLONE" RESULT
+    for r in "${RESULTS[@]}"; do
+        IFS='|' read -r t id kept res <<<"$r"
+        printf '  %-8s %-7s %-11s %s\n' "$t" "$id" "$kept" "$res"
+    done
+    [[ "$KEEP" == no ]] || info "Remove each kept clone by hand: qm destroy <id> --purge"
+}
+
+# Usage: verify_built <target> <VMIDs before the build>
+# The new template is the one VMID that was not there before the build.
+# With --keep, the kept clone is found the same way, around the verify.
+verify_built() {
+    local p="$1" before="$2" after new post kept="-" rc=0 args=()
+    if [[ "$before" == "?" ]] || ! after="$(list_vmids)"; then
+        new=""
+    else
+        new="$(comm -13 <(printf '%s\n' "$before") <(printf '%s\n' "$after") | grep -v '^$' || true)"
+    fi
+    if [[ -z "$new" || "$new" == *$'\n'* ]]; then
+        new="${new//$'\n'/ }"
+        warn "Could not work out the VMID of the $p template (new VMIDs: ${new:-none}; want exactly one). Not verified."
+        RESULTS+=("$p|?|-|skipped (VMID unknown)")
+        VERIFY_FAILED=yes
+        return 0
+    fi
+    [[ -n "$TEST_MAIL" ]] && args+=(--send-test-mail "$TEST_MAIL")
+    [[ "$KEEP" == yes ]] && args+=(--keep)
+    info "Verifying: $p (VMID $new)"
+    bash "$VERIFY_CLONE" "$new" --profile "$p" --config "$SHARED_CONF" "${args[@]}" || rc=$?
+    if [[ "$KEEP" == yes ]]; then
+        if post="$(list_vmids)"; then
+            kept="$(comm -13 <(printf '%s\n' "$after") <(printf '%s\n' "$post") | grep -v '^$' || true)"
+            kept="${kept//$'\n'/ }"
+        fi
+        [[ -n "$kept" && "$kept" != "-" ]] || kept="none found"
+    fi
+    if (( rc == 0 )); then
+        RESULTS+=("$p|$new|$kept|passed")
+    else
+        RESULTS+=("$p|$new|$kept|FAILED (exit $rc)")
+        VERIFY_FAILED=yes
+    fi
+    # Ctrl-C or kill during the verify stops the whole run.
+    if (( rc == 130 || rc == 143 )); then summary; exit "$rc"; fi
+}
+
 for p in "${PROFILES[@]}"; do
     info "Building: $p"
-    bash "$PUBLIC_SCRIPT" --config "$OUT_DIR/$p.conf" "${CREATE_ARGS[@]}"
+    if [[ "$VERIFY" == no ]]; then
+        bash "$PUBLIC_SCRIPT" --config "$OUT_DIR/$p.conf" "${CREATE_ARGS[@]}"
+        continue
+    fi
+    before="$(list_vmids)" || { warn "qm list failed: the new VMID cannot be worked out."; before="?"; }
+    rc=0
+    bash "$PUBLIC_SCRIPT" --config "$OUT_DIR/$p.conf" "${CREATE_ARGS[@]}" || rc=$?
+    if (( rc )); then
+        # A failed build stops the run, as without --verify.
+        RESULTS+=("$p|-|-|not verified (build failed, exit $rc)")
+        summary
+        exit "$rc"
+    fi
+    verify_built "$p" "$before"
 done
+if [[ "$VERIFY" == yes ]]; then
+    summary
+    [[ "$VERIFY_FAILED" == no ]] || exit 1
+fi

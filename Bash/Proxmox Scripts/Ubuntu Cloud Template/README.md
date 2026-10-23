@@ -81,8 +81,13 @@ Other forms:
 ./build-templates.sh base|extras|desktop|all
 ./build-templates.sh --generate-only
 ./build-templates.sh extras -- --unattended --vmid 52000 --auto-vmid --template
+./build-templates.sh all --verify --send-test-mail you@example.com
 ./build-templates.sh --help
 ```
+
+`--verify` runs `verify-clone.sh` on each template right after it is built
+(see below). `--send-test-mail <address>` and `--keep` are passed on to it
+and only work with `--verify`. All three go before `--`.
 
 `--help` (also `-h` or `help`) prints the full help and works without root,
 a config file or profiles.
@@ -182,6 +187,19 @@ The clone is destroyed on success, failure and Ctrl-C. Only a VM this run
 created is ever stopped or destroyed. Exit codes: 0 passed, 1 a FAIL or a
 clone/start error, 2 usage error, 3 agent timeout, 4 cloud-init error, 5 guest
 command timeout.
+
+`./build-templates.sh <target> --verify` does this for each template it
+builds, with `--profile <target>` and `--config` set to the `shared.conf` it
+used. It takes a few minutes per template. The new template's VMID is the one
+VMID in `qm list` after the build that was not there before. If there is not
+exactly one, that template is not verified and counts as a failure. A failed
+verify does not stop the other targets. A summary is printed at the end, and
+the exit code is 1 if any verify failed. A failed build still stops the run
+with the create script's exit code. With `--keep`, each verify clone is left
+running and the summary lists its VMID; remove each one by hand with
+`qm destroy <id> --purge`. `verify-clone.sh` and `verify-template.sh`
+must be next to `build-templates.sh` (or set `VERIFY_CLONE`); this is checked
+before anything is built.
 
 ## Verifying a clone by hand
 
