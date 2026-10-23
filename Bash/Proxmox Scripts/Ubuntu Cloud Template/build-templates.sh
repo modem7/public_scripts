@@ -51,7 +51,7 @@ PUBLIC_SCRIPT_URLS=(
     "https://raw.githubusercontent.com/modem7/public_scripts/master/Bash/Proxmox%20Scripts/create-ubuntu-cloud-template.sh"
 )
 ZSWAP_SCRIPT_URL="https://raw.githubusercontent.com/modem7/public_scripts/master/Bash/Server%20scripts/zram-to-zswap.sh"
-OUT_DIR="${OUT_DIR:-/root/template-build}"     # generated profiles + payloads (root-only)
+OUT_DIR="${OUT_DIR:-$SCRIPT_DIR/template-build}"     # generated profiles + payloads (root-only)
 
 # --- Host defaults: written into every profile, which can override them ---
 DISTRO_VER="resolute"
@@ -199,7 +199,7 @@ ENVIRONMENT
   PUBLIC_SCRIPT          Local copy of create-ubuntu-cloud-template.sh.
                          Default: /root/create-ubuntu-cloud-template.sh
   OUT_DIR                Where generated files go.
-                         Default: /root/template-build
+                         Default: template-build next to this script
   UPDATE_PUBLIC_SCRIPT   no = keep the local PUBLIC_SCRIPT. Default: yes
 
 OUTPUT
