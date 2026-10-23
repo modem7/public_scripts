@@ -20,12 +20,14 @@
 
 # --- Host defaults ---
 # Written into every profile first, so a profile can override any of them.
-# In a profile, override the SSH key with SSH_KEY, not CI_SSH_KEY.
+# In a profile, override the SSH key with SSH_KEY and the login with
+# CLOUD_USER_DEFAULT, not CI_SSH_KEY / CI_USER.
 DISTRO_VER="resolute"
 DISK_STOR=""           # blank = the host's only VM-disk storage (local-lvm or
                        # local-zfs). Set it only if the host has several.
 NET_BRIDGE="vmbr0"
 VLAN=""                # blank = no VLAN tag
+CI_USER="ubuntu"                             # cloud-init login name
 CI_SSH_KEY="github.com/<your-github-user>"   # cloud-init user's key(s), or the key itself
 CLOUD_PASSWORD=""                            # blank = generated each build
 

@@ -65,6 +65,7 @@ DISTRO_VER="resolute"
 DISK_STOR=""                       # blank = the host's only VM-disk storage (local-lvm / local-zfs)
 NET_BRIDGE="vmbr0"
 VLAN=""
+CI_USER="ubuntu"                   # cloud-init login name; written as CLOUD_USER_DEFAULT
 CI_SSH_KEY=""                      # cloud-init user's key(s), or "github.com/<user>"; written as SSH_KEY
 CLOUD_PASSWORD=""                  # blank = generated each build, shown at the end
 
@@ -196,9 +197,11 @@ CONFIG
 
   How OUT_DIR/<target>.conf is put together, in order:
     1. Host defaults from shared.conf (DISTRO_VER, DISK_STOR, NET_BRIDGE,
-       VLAN, CI_SSH_KEY as SSH_KEY, CLOUD_PASSWORD if set).
+       VLAN, CI_USER as CLOUD_USER_DEFAULT, CI_SSH_KEY as SSH_KEY,
+       CLOUD_PASSWORD if set).
     2. profiles/<target>.conf as it is, so it can override step 1.
-       Override the SSH key there with SSH_KEY, not CI_SSH_KEY.
+       Override the SSH key there with SSH_KEY and the login with
+       CLOUD_USER_DEFAULT, not CI_SSH_KEY / CI_USER.
     3. The payloads, appended with +=: UPLOAD_FILES, CUSTOMIZE_SCRIPTS,
        FIRSTBOOT_SCRIPTS, EXTRA_VC_ARGS, and any of unattended-upgrades,
        zsh and (if the relay logs in) libsasl2-modules missing from
@@ -237,6 +240,7 @@ CONFIG
     DISK_STOR            blank = the host's only VM-disk storage
     NET_BRIDGE           vmbr0
     VLAN                 blank
+    CI_USER              ubuntu (cloud-init login name)
     CI_SSH_KEY           blank (key(s), or github.com/<user>)
     CLOUD_PASSWORD       blank = generated each build, shown at the end
 
@@ -827,6 +831,7 @@ DISTRO_VER=$(q "$DISTRO_VER")
 DISK_STOR=$(q "$DISK_STOR")
 NET_BRIDGE=$(q "$NET_BRIDGE")
 VLAN=$(q "$VLAN")
+CLOUD_USER_DEFAULT=$(q "$CI_USER")
 SSH_KEY=$(q "$CI_SSH_KEY")
 $( [[ -n "$CLOUD_PASSWORD" ]] && echo "CLOUD_PASSWORD=$(q "$CLOUD_PASSWORD")" )
 
@@ -933,6 +938,8 @@ generate() {
     done
     [[ "$ANSIBLE_SSH_PUBKEY" != *"AAAA..."* ]] \
         || die "ANSIBLE_SSH_PUBKEY is still the placeholder from shared.conf.example: set your ansible public key in $SHARED_CONF."
+    [[ "$CI_USER" =~ ^[a-z_][a-z0-9_-]*$ ]] \
+        || die "CI_USER '$CI_USER' is not a valid login name: use lowercase letters, digits, _ and -, starting with a letter or _ (in $SHARED_CONF)."
     [[ "$CI_SSH_KEY" != *"<your-github-user>"* ]] \
         || die "CI_SSH_KEY still has the <your-github-user> placeholder: set your key or GitHub user (or blank it) in $SHARED_CONF."
     [[ ! "$WAKATIME_CFG" =~ api_key[[:space:]]*=[[:space:]]*x+[[:space:]]*$ ]] \
