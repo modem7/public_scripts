@@ -48,8 +48,9 @@ cloud image and a few scripts are downloaded on each build).
 5. Clone the template in Proxmox as usual, set the user, password and SSH key
    on the Cloud-Init tab, and start it.
 
-To update, run `git pull` in the clone and build again. `./build-templates.sh
---help` lists every option and setting.
+To update, run `git pull` in the clone, then `./build-templates.sh --init`
+to add any new settings to your config (appended, commented out), and build
+again. `./build-templates.sh --help` lists every option and setting.
 
 ## Files
 
@@ -83,7 +84,12 @@ touches them. The folder is `CONFIG_DIR`, default
 under `XDG_CONFIG_HOME` if set). `--init` copies `shared.conf.example` to
 `shared.conf` and each `profiles/*.conf.example` to `profiles/*.conf` in it.
 Folders are mode 700, files 600. A file that already exists is kept, never
-overwritten, so it is safe to run again. It needs no root, but the builder
+overwritten, so it is safe to run again. The only change it makes to one is
+to append settings that are new in the `.example` file (missing from yours,
+even as a comment), commented out under a dated heading, for you to enable
+if you need them. A setting whose value spans several lines (such as
+`WAKATIME_CFG`) is not appended; `--init` names it so you can copy it over
+by hand. It needs no root, but the builder
 runs as root and reads root's folder, so run it as root (or set
 `CONFIG_DIR`).
 
