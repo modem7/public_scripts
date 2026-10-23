@@ -27,6 +27,8 @@
 #    ./build-templates.sh base|extras|desktop|all [-- <create-script args>]
 #    ./build-templates.sh extras --verify     # build, then verify-clone.sh it
 #      (--send-test-mail <addr> and --keep are passed on; only with --verify)
+#      (--verify, --keep, --send-test-mail may go anywhere before --; other
+#       args after the target, and all args after --, go to the create script)
 #    ./build-templates.sh --generate-only     # write files, don't build
 #    ./build-templates.sh --help              # full help, no root needed
 #
@@ -125,7 +127,8 @@ and your profiles/<target>.conf.
 
 USAGE
   ./build-templates.sh base|extras|desktop|all [--verify [--keep]
-                       [--send-test-mail <addr>]] [-- <create-script args>]
+                       [--send-test-mail <addr>]] [<create-script args>]
+                       [-- <create-script args>]
   ./build-templates.sh --generate-only
   ./build-templates.sh --init
   ./build-templates.sh -h|--help|help
@@ -154,7 +157,12 @@ ARGUMENTS
   --keep            Passed to verify-clone.sh: each verify clone is left
                     running, and its VMID is shown in the summary. Only
                     with --verify.
-  -- <args>         Passed as they are to create-ubuntu-cloud-template.sh.
+  <args>            Any other args after the target are passed, in order,
+                    to create-ubuntu-cloud-template.sh. --verify, --keep
+                    and --send-test-mail may go anywhere before --,
+                    mixed in with them; they are not passed on.
+  -- <args>         Everything after -- is passed as it is, even
+                    --verify, --keep or --send-test-mail.
                     Default: --unattended --vmid 52000 --auto-vmid --template
                     Any args given replace the whole default list, e.g.
                     -- --unattended --vmid 53000 --auto-vmid --template
@@ -319,9 +327,12 @@ EOF
 
 usage_error() { { echo "Error: $*"; echo; usage; } >&2; exit 1; }
 
-# The target and this script's own options come first. After the target,
-# the first other argument (or --) starts the create-script args.
+# The target is the first word that is not one of this script's options.
+# This script's options are picked out anywhere before a literal --.
+# Every other argument after the target goes, in order, to the create
+# script. Everything after -- goes there as it is, -- itself dropped.
 TARGET="" VERIFY=no TEST_MAIL="" KEEP=no INIT=no
+CREATE_ARGS=()
 while (( $# )); do
     case "$1" in
         --init)   INIT=yes ;;
@@ -330,18 +341,25 @@ while (( $# )); do
         --send-test-mail)
             [[ -n "${2:-}" ]] || usage_error "--send-test-mail needs an address."
             TEST_MAIL="$2"; shift ;;
-        *)  [[ -z "$TARGET" ]] || break
-            case "$1" in
-                -h|--help|help) usage; exit 0 ;;
-                base|extras|desktop|all|--generate-only) TARGET="$1" ;;
-                "") usage_error "no target given." ;;
-                *)  usage_error "unknown target: $1" ;;
-            esac ;;
+        --) [[ -n "$TARGET" ]] || usage_error "unknown target: $1"
+            shift
+            CREATE_ARGS+=("$@")
+            break ;;
+        *)  if [[ -n "$TARGET" ]]; then
+                CREATE_ARGS+=("$1")
+            else
+                case "$1" in
+                    -h|--help|help) usage; exit 0 ;;
+                    base|extras|desktop|all|--generate-only) TARGET="$1" ;;
+                    "") usage_error "no target given." ;;
+                    *)  usage_error "unknown target: $1" ;;
+                esac
+            fi ;;
     esac
     shift
 done
 if [[ "$INIT" == yes ]]; then
-    [[ -z "$TARGET" && "$VERIFY" == no && "$KEEP" == no && -z "$TEST_MAIL" && $# -eq 0 ]] \
+    [[ -z "$TARGET" && "$VERIFY" == no && "$KEEP" == no && -z "$TEST_MAIL" && ${#CREATE_ARGS[@]} -eq 0 ]] \
         || usage_error "--init takes no target or other options."
     TARGET=--init
 fi
@@ -349,8 +367,6 @@ fi
 [[ "$VERIFY" == yes || -z "$TEST_MAIL" ]] || usage_error "--send-test-mail only works with --verify."
 [[ "$VERIFY" == yes || "$KEEP" == no ]] || usage_error "--keep only works with --verify."
 [[ "$VERIFY" == no || "$TARGET" != --generate-only ]] || usage_error "--verify does not work with --generate-only."
-[[ "${1:-}" == "--" ]] && shift
-CREATE_ARGS=("$@")
 
 # =============================================================================
 info() { echo -e "\033[0;36m[build]\033[0m $*"; }
