@@ -350,6 +350,7 @@ if [[ -n "$TEST_MAIL" ]]; then
             break
         elif line="$(grep -E 'status=(deferred|bounced)' <<< "$mine" | tail -1)" && [[ -n "$line" ]]; then
             echo "        $line"
+            grep -iE 'warning|error|fatal|panic' "$WORK/out" | grep -vF -- "$line" | tail -5 | sed 's/^/        /'
             echo -e "  ${R}FAIL${N}  mail not relayed: $(grep -oE 'status=(deferred|bounced)' <<< "$line")"
             (( RC == 0 )) && RC=1
             break
