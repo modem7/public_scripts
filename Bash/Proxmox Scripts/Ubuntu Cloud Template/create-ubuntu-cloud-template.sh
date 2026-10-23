@@ -1945,6 +1945,9 @@ EOF
             --write "/etc/tuned/active_profile:${TUNED_PROFILE}"$'\n'
             --write "/etc/tuned/profile_mode:manual"$'\n'
             --run-command "systemctl enable tuned.service"
+            # GNOME's power-profiles-daemon conflicts with tuned: at boot it
+            # stops tuned seconds after it starts. Mask it so tuned stays up.
+            --run-command "systemctl mask power-profiles-daemon.service"
         )
     fi
 
