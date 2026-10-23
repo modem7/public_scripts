@@ -323,7 +323,9 @@ if [[ -f "$w" ]]; then
 else
     fail "$w missing"
 fi
-if [[ -n "$LOGIN_USER" ]]; then
+if [[ "$LOGIN_USER" == root ]]; then
+    warn "login user is root (Cloud-Init tab): shell, sudo and dotfile checks skipped; set a normal user there to test them"
+elif [[ -n "$LOGIN_USER" ]]; then
     [[ "$(getent passwd "$LOGIN_USER" | cut -d: -f7)" == "$EXPECT_SHELL" ]] \
         && pass "login user $LOGIN_USER uses $EXPECT_SHELL" || fail "login user $LOGIN_USER does not use $EXPECT_SHELL"
     id -nG "$LOGIN_USER" | grep -qw sudo && pass "$LOGIN_USER is in the sudo group" || fail "$LOGIN_USER is not in the sudo group"
