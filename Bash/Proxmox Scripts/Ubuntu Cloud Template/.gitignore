@@ -2,5 +2,5 @@
 # The example (profile.conf.example) is not ignored.
 *.conf
 
-# Output of build-templates.sh (normally /root/template-build, in case OUT_DIR is set inside the repo).
+# Output of build-templates.sh (default: template-build next to the script).
 template-build/
