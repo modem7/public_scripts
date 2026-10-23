@@ -63,9 +63,16 @@ CLOUD_PASSWORD=""                  # blank = generated each build, shown at the 
 
 ANSIBLE_SSH_PUBKEY=""              # required
 
-GMAIL_USER=""                      # required
-GMAIL_APP_PASSWORD=""              # required
+MAIL_RELAY="gmail"                 # gmail, custom (MAIL_RELAY_HOST/PORT) or none (local only)
+MAIL_RELAY_HOST=""                 # custom only
+MAIL_RELAY_PORT=""                 # custom only: 587, 465 or 25
+MAIL_RELAY_USER=""                 # SMTP login; required for gmail, blank (custom) = no login
+MAIL_RELAY_PASSWORD=""             # required when MAIL_RELAY_USER is set
+MAIL_ROOT_TO=""                    # root's mail; blank = MAIL_RELAY_USER if it has an @
+MAIL_SENDER=""                     # blank = no sender rewrite
 MAIL_DOMAIN=""                     # required; mail is sent as user@<short hostname>.MAIL_DOMAIN
+GMAIL_USER=""                      # old names for MAIL_RELAY_USER / MAIL_RELAY_PASSWORD
+GMAIL_APP_PASSWORD=""
 
 UU_MAIL=""                         # blank = no unattended-upgrades mail
 
@@ -90,7 +97,8 @@ JOURNAL_MAX_PERCENT="10"
 # a profile can't break Postfix, unattended upgrades or the login shell.
 # bsd-mailx is installed by the postfix payload, AFTER the debconf preseed:
 # installed earlier it would pull postfix in with the default answers.
-BUILDER_PKGS=(libsasl2-modules unattended-upgrades zsh)
+# libsasl2-modules is added after shared.conf is read, if the relay logs in.
+BUILDER_PKGS=(unattended-upgrades zsh)
 
 # =============================================================================
 #  HELP
@@ -132,10 +140,10 @@ TEMPLATES
             unzip.
   desktop   ubuntu-2604-desktop. extras plus GNOME and RDP. Keeps snapd.
             4096 MB RAM, 40G disk.
-  All three get: Postfix relay via Gmail, an ansible user with sudo,
-  unattended upgrades and zram to zswap on first boot. Also, each as set
-  in shared.conf: a journald size cap, dotfiles in /etc/skel, and the
-  login shell, needrestart and Pro advert tweaks.
+  All three get: Postfix (relay set by MAIL_RELAY), an ansible user with
+  sudo, unattended upgrades and zram to zswap on first boot. Also, each
+  as set in shared.conf: a journald size cap, dotfiles in /etc/skel, and
+  the login shell, needrestart and Pro advert tweaks.
 
 CONFIG
   Two kinds of file, both git-ignored. Copy the .example next to each.
@@ -162,14 +170,35 @@ CONFIG
     2. profiles/<target>.conf as it is, so it can override step 1.
        Override the SSH key there with SSH_KEY, not CI_SSH_KEY.
     3. The payloads, appended with +=: UPLOAD_FILES, CUSTOMIZE_SCRIPTS,
-       FIRSTBOOT_SCRIPTS, EXTRA_VC_ARGS, and any of libsasl2-modules,
-       unattended-upgrades and zsh missing from EXTRA_VIRT_PKGS.
+       FIRSTBOOT_SCRIPTS, EXTRA_VC_ARGS, and any of unattended-upgrades,
+       zsh and (if the relay logs in) libsasl2-modules missing from
+       EXTRA_VIRT_PKGS.
 
   shared.conf, required:
     ANSIBLE_SSH_PUBKEY   Public key for the ansible user.
-    GMAIL_USER           Gmail account mail is relayed through.
-    GMAIL_APP_PASSWORD   App password for that account.
     MAIL_DOMAIN          Mail is sent as user@<short hostname>.MAIL_DOMAIN.
+
+  shared.conf, mail (default):
+    MAIL_RELAY           gmail. One of:
+                           gmail   smtp.gmail.com port 587, with a login
+                           custom  MAIL_RELAY_HOST and MAIL_RELAY_PORT
+                           none    no relay: mail stays on the clone
+    MAIL_RELAY_HOST      custom only: host name or IPv4 address.
+    MAIL_RELAY_PORT      custom only: 587 (STARTTLS, required), 465
+                         (TLS from the start), or 25 or any other
+                         port (TLS if offered).
+    MAIL_RELAY_USER      SMTP login. Required for gmail. For custom,
+                         blank = no login (an internal relay).
+    MAIL_RELAY_PASSWORD  Password for that login (Gmail: an app
+                         password). Required when MAIL_RELAY_USER is set.
+    MAIL_ROOT_TO         Where root's mail goes. Default: MAIL_RELAY_USER
+                         if it is an address, else required (with none,
+                         blank = /etc/aliases left alone).
+    MAIL_SENDER          blank = no rewrite: mail goes out as
+                         user@<fqdn>. Set = every sender rewritten to
+                         this address (some relays need it).
+    GMAIL_USER and GMAIL_APP_PASSWORD are still read as the old names
+    for MAIL_RELAY_USER and MAIL_RELAY_PASSWORD, with a warning.
 
   shared.conf, host defaults (default):
     DISTRO_VER           resolute
@@ -268,6 +297,24 @@ mapfile -t leftover < <(compgen -v PKGS_ || true)
     || warn "Ignored in $SHARED_CONF (set EXTRA_VIRT_PKGS and TAG in profiles/<t>.conf instead): ${leftover[*]}"
 unset leftover
 
+# Mail: old Gmail names, relay presets, root alias. Checked in generate().
+if [[ -n "$GMAIL_USER" || -n "$GMAIL_APP_PASSWORD" ]]; then
+    warn "GMAIL_USER / GMAIL_APP_PASSWORD are old names: rename them to MAIL_RELAY_USER / MAIL_RELAY_PASSWORD in $SHARED_CONF."
+    [[ -n "$MAIL_RELAY_USER" ]] || MAIL_RELAY_USER="$GMAIL_USER"
+    [[ -n "$MAIL_RELAY_PASSWORD" ]] || MAIL_RELAY_PASSWORD="$GMAIL_APP_PASSWORD"
+fi
+MAIL_RELAY="${MAIL_RELAY:-gmail}"
+if [[ "$MAIL_RELAY" == gmail ]]; then
+    MAIL_RELAY_HOST="smtp.gmail.com"
+    MAIL_RELAY_PORT="587"
+fi
+if [[ "$MAIL_RELAY" != none && -z "$MAIL_ROOT_TO" && "$MAIL_RELAY_USER" == *@* ]]; then
+    MAIL_ROOT_TO="$MAIL_RELAY_USER"
+fi
+# True if the relay logs in (SASL).
+relay_login() { [[ "$MAIL_RELAY" != none && -n "$MAIL_RELAY_USER" ]]; }
+relay_login && BUILDER_PKGS=(libsasl2-modules "${BUILDER_PKGS[@]}")
+
 # Quote a value so it can be 'source'd back safely.
 q() { printf '%q' "$1"; }
 
@@ -301,13 +348,54 @@ EOF
     } > "$OUT_DIR/payload/ansible.sh"
 }
 
+# The body is put together here, per MAIL_RELAY, so the script on the
+# image only holds the steps it runs. Settings are quoted variables at the
+# top; host and port are checked in generate() before they are written.
+# SC2016: the single-quoted $ is payload text, expanded on the image.
+# shellcheck disable=SC2016
 write_postfix_payload() {
+    local relay="" pc=() i
+    [[ "$MAIL_RELAY" == none ]] || relay="[$MAIL_RELAY_HOST]:$MAIL_RELAY_PORT"
+
+    # postconf -e arguments, as payload text.
+    if [[ -n "$relay" ]]; then
+        pc+=('"relayhost=$relay"')
+        case "$MAIL_RELAY_PORT" in
+            587) pc+=('"smtp_tls_security_level=encrypt"') ;;
+            465) pc+=('"smtp_tls_security_level=encrypt"' '"smtp_tls_wrappermode=yes"') ;;
+            *)   pc+=('"smtp_tls_security_level=may"') ;;
+        esac
+        pc+=('"smtp_tls_CAfile=/etc/ssl/certs/ca-certificates.crt"')
+    fi
+    if relay_login; then
+        pc+=('"smtp_sasl_auth_enable=yes"'
+             '"smtp_sasl_security_options=noanonymous"'
+             '"smtp_sasl_password_maps=$db:/etc/postfix/sasl/sasl_passwd"')
+    fi
+    if [[ -n "$MAIL_SENDER" ]]; then
+        pc+=('"sender_canonical_classes=envelope_sender, header_sender"'
+             '"sender_canonical_maps=static:$MAIL_SENDER"')
+    fi
+    pc+=('"inet_interfaces=loopback-only"'
+         '"inet_protocols=ipv4"'
+         '"mynetworks=127.0.0.0/8"'
+         '"mydomain=$MAIL_DOMAIN"'
+         '"myhostname=$fqdn"'
+         '"myorigin=/etc/mailname"'
+         "'mydestination=\$myhostname, localhost.\$mydomain, localhost'"
+         '"maximal_queue_lifetime=1d"'
+         '"bounce_queue_lifetime=1d"')
+
     {
         echo '#!/bin/bash'
-        echo "# Generated by build-templates.sh: postfix relay via Gmail."
-        echo "GMAIL_USER=$(q "$GMAIL_USER")"
-        echo "GMAIL_APP_PASSWORD=$(q "$GMAIL_APP_PASSWORD")"
+        echo "# Generated by build-templates.sh: postfix, MAIL_RELAY=$MAIL_RELAY."
+        if relay_login; then
+            echo "MAIL_RELAY_USER=$(q "$MAIL_RELAY_USER")"
+            echo "MAIL_RELAY_PASSWORD=$(q "$MAIL_RELAY_PASSWORD")"
+        fi
         echo "MAIL_DOMAIN=$(q "$MAIL_DOMAIN")"
+        [[ -z "$MAIL_ROOT_TO" ]] || echo "MAIL_ROOT_TO=$(q "$MAIL_ROOT_TO")"
+        [[ -z "$MAIL_SENDER" ]] || echo "MAIL_SENDER=$(q "$MAIL_SENDER")"
         cat <<'EOF'
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
@@ -316,41 +404,54 @@ echo "postfix postfix/main_mailer_type select Local only" | debconf-set-selectio
 echo "postfix postfix/mailname string localhost" | debconf-set-selections
 apt-get install -y -q postfix bsd-mailx
 
-relay="[smtp.gmail.com]:587"
-db="$(postconf -h default_database_type)"   # hash or lmdb
+EOF
+        [[ -z "$relay" ]] || echo "relay=\"$relay\""
+        relay_login && echo 'db="$(postconf -h default_database_type)"   # hash or lmdb'
+        cat <<'EOF'
 # Placeholder until first boot: no clone is called localhost, so
 # postfix-identity always re-stamps this with the clone's real name.
 fqdn="localhost.${MAIL_DOMAIN}"
 echo "$fqdn" > /etc/mailname
 
+EOF
+        if relay_login; then
+            cat <<'EOF'
 install -d -m 755 /etc/postfix/sasl
-( umask 077; printf '%s %s:%s\n' "$relay" "$GMAIL_USER" "$GMAIL_APP_PASSWORD" > /etc/postfix/sasl/sasl_passwd )
+( umask 077; printf '%s %s:%s\n' "$relay" "$MAIL_RELAY_USER" "$MAIL_RELAY_PASSWORD" > /etc/postfix/sasl/sasl_passwd )
 postmap "$db:/etc/postfix/sasl/sasl_passwd"
 chmod 600 /etc/postfix/sasl/sasl_passwd*
 
-# No sender rewrite: mail goes out as the natural user@<fqdn>.
-# Short queue lifetimes so an undeliverable message can't loop for days.
-postconf -e \
-    "relayhost=$relay" \
-    "smtp_tls_security_level=encrypt" \
-    "smtp_tls_CAfile=/etc/ssl/certs/ca-certificates.crt" \
-    "smtp_sasl_auth_enable=yes" \
-    "smtp_sasl_security_options=noanonymous" \
-    "smtp_sasl_password_maps=$db:/etc/postfix/sasl/sasl_passwd" \
-    "inet_interfaces=loopback-only" \
-    "inet_protocols=ipv4" \
-    "mynetworks=127.0.0.0/8" \
-    "mydomain=$MAIL_DOMAIN" \
-    "myhostname=$fqdn" \
-    "myorigin=/etc/mailname" \
-    'mydestination=$myhostname, localhost.$mydomain, localhost' \
-    "maximal_queue_lifetime=1d" \
-    "bounce_queue_lifetime=1d"
+EOF
+        fi
+        if [[ -n "$MAIL_SENDER" ]]; then
+            echo '# Every sender (envelope and From header) is rewritten to MAIL_SENDER.'
+        else
+            echo '# No sender rewrite: mail goes out as the natural user@<fqdn>.'
+        fi
+        echo "# Short queue lifetimes so an undeliverable message can't loop for days."
+        echo "postconf -e \\"
+        for (( i = 0; i < ${#pc[@]} - 1; i++ )); do
+            echo "    ${pc[i]} \\"
+        done
+        echo "    ${pc[-1]}"
+        if [[ -n "$relay" ]]; then
+            cat <<'EOF'
 # "Local only" sets these to error, which bounces every outgoing mail.
 postconf -X default_transport relay_transport
-
-# Root's local mail (bounces, users' cron jobs) goes to Gmail.
-grep -q '^root:' /etc/aliases 2>/dev/null || printf 'root: %s\n' "$GMAIL_USER" >> /etc/aliases
+EOF
+        else
+            cat <<'EOF'
+# MAIL_RELAY=none: "Local only" stays as it is, so mail never leaves.
+EOF
+        fi
+        echo
+        if [[ -n "$MAIL_ROOT_TO" ]]; then
+            cat <<'EOF'
+# Root's local mail (bounces, users' cron jobs) goes to MAIL_ROOT_TO.
+grep -q '^root:' /etc/aliases 2>/dev/null || printf 'root: %s\n' "$MAIL_ROOT_TO" >> /etc/aliases
+EOF
+        fi
+        cat <<'EOF'
 newaliases
 
 # The chroot copy of resolv.conf must be root-owned, or postfix warns.
@@ -631,11 +732,60 @@ check_profiles() {
     done
 }
 
+# True if an address is one of the .example placeholders.
+placeholder_addr() {
+    local a="${1,,}"
+    [[ "$a" == you@gmail.com || "$a" == you@example.com || "$a" =~ @example\.[^@]*$ ]]
+}
+
+# The mail settings must make sense for MAIL_RELAY, with no placeholders
+# left from shared.conf.example. Never prints the password.
+check_mail() {
+    local v
+    case "$MAIL_RELAY" in
+        gmail|custom|none) ;;
+        *) die "MAIL_RELAY must be gmail, custom or none, not '$MAIL_RELAY'." ;;
+    esac
+    [[ ! "${MAIL_DOMAIN,,}" =~ ^example\.(com|org|net)$ ]] \
+        || die "MAIL_DOMAIN is still the placeholder $MAIL_DOMAIN: set your own domain in $SHARED_CONF."
+    # The relay login first: MAIL_ROOT_TO may have been copied from it.
+    if [[ "$MAIL_RELAY" != none ]] && placeholder_addr "$MAIL_RELAY_USER"; then
+        die "MAIL_RELAY_USER is still the placeholder $MAIL_RELAY_USER: set your own login in $SHARED_CONF."
+    fi
+    for v in MAIL_ROOT_TO MAIL_SENDER; do
+        [[ -z "${!v}" || "${!v}" == *@* ]] || die "$v must be an email address."
+        if placeholder_addr "${!v}"; then
+            die "$v is still the placeholder ${!v}: set your own address in $SHARED_CONF."
+        fi
+    done
+    [[ "$MAIL_RELAY" == none ]] && return 0
+
+    if [[ "$MAIL_RELAY" == custom ]]; then
+        [[ -n "$MAIL_RELAY_HOST" ]] || die "Set MAIL_RELAY_HOST in $SHARED_CONF (MAIL_RELAY=custom)."
+        [[ "$MAIL_RELAY_HOST" =~ ^[A-Za-z0-9.-]+$ ]] \
+            || die "MAIL_RELAY_HOST must be a host name or IPv4 address, not '$MAIL_RELAY_HOST'."
+        [[ -n "$MAIL_RELAY_PORT" ]] || die "Set MAIL_RELAY_PORT in $SHARED_CONF (MAIL_RELAY=custom)."
+        if [[ ! "$MAIL_RELAY_PORT" =~ ^[1-9][0-9]{0,4}$ ]] || (( MAIL_RELAY_PORT > 65535 )); then
+            die "MAIL_RELAY_PORT must be a port number, not '$MAIL_RELAY_PORT'."
+        fi
+    else
+        [[ -n "$MAIL_RELAY_USER" ]] || die "Set MAIL_RELAY_USER in $SHARED_CONF (MAIL_RELAY=gmail)."
+    fi
+    if [[ -n "$MAIL_RELAY_USER" ]]; then
+        [[ -n "$MAIL_RELAY_PASSWORD" ]] || die "Set MAIL_RELAY_PASSWORD in $SHARED_CONF (MAIL_RELAY_USER is set)."
+        [[ ! "$MAIL_RELAY_PASSWORD" =~ ^x+$ ]] \
+            || die "MAIL_RELAY_PASSWORD is still the xxxx placeholder: set the real password in $SHARED_CONF."
+    fi
+    [[ -n "$MAIL_ROOT_TO" ]] \
+        || die "Set MAIL_ROOT_TO in $SHARED_CONF: where root's mail goes (MAIL_RELAY_USER is not an address)."
+}
+
 generate() {
     local v
-    for v in ANSIBLE_SSH_PUBKEY GMAIL_USER GMAIL_APP_PASSWORD MAIL_DOMAIN; do
+    for v in ANSIBLE_SSH_PUBKEY MAIL_DOMAIN; do
         [[ -n "${!v}" ]] || die "Set $v in $SHARED_CONF."
     done
+    check_mail
     [[ -z "$JOURNAL_MAX_MB" || ( "$JOURNAL_MAX_MB" =~ ^[0-9]+$ && "$JOURNAL_MAX_PERCENT" =~ ^[0-9]+$ ) ]] \
         || die "JOURNAL_MAX_MB and JOURNAL_MAX_PERCENT must be numbers."
     [[ -z "$NEEDRESTART_MODE" || "$NEEDRESTART_MODE" =~ ^[ali]$ ]] || die "NEEDRESTART_MODE must be a, l, i or blank."

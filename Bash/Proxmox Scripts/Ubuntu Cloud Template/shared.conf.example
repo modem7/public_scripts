@@ -30,10 +30,20 @@ CLOUD_PASSWORD=""                            # blank = generated each build
 # --- Ansible user (required) ---
 ANSIBLE_SSH_PUBKEY="ssh-ed25519 AAAA... ansible"
 
-# --- Postfix relay through Gmail (required) ---
-GMAIL_USER="you@gmail.com"
-GMAIL_APP_PASSWORD="xxxxxxxxxxxxxxxx"        # Google app password
+# --- Postfix mail relay ---
+# MAIL_RELAY: gmail  = smtp.gmail.com port 587 (MAIL_RELAY_HOST/PORT ignored)
+#             custom = MAIL_RELAY_HOST and MAIL_RELAY_PORT below
+#             none   = no relay: mail stays on the clone
+MAIL_RELAY="gmail"
+MAIL_RELAY_HOST=""                           # custom only: host name or IPv4 address
+MAIL_RELAY_PORT=""                           # custom only: 587 (STARTTLS, required),
+                                             # 465 (TLS from the start), 25 (TLS if offered)
+MAIL_RELAY_USER="you@gmail.com"              # SMTP login; custom: blank = no login
+MAIL_RELAY_PASSWORD="xxxxxxxxxxxxxxxx"       # Gmail: a Google app password
+MAIL_ROOT_TO=""                              # root's mail; blank = MAIL_RELAY_USER if it is an address
+MAIL_SENDER=""                               # blank = no rewrite; set = every sender becomes this
 MAIL_DOMAIN="example.com"                    # mail is sent as user@<short hostname>.example.com
+# The old names GMAIL_USER and GMAIL_APP_PASSWORD still work (with a warning).
 
 # --- Unattended upgrades report (blank = no mail) ---
 UU_MAIL="you@gmail.com"

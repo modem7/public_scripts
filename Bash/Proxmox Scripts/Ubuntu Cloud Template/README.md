@@ -36,7 +36,7 @@ are committed.
   `create-ubuntu-cloud-template.sh --config` (see `profile.conf.example`).
   No secrets.
 - `shared.conf`: the opinionated side, the same for every template. Ansible
-  key, Gmail relay, unattended upgrades mail, dotfiles, WakaTime, login
+  key, mail relay, unattended upgrades mail, dotfiles, WakaTime, login
   shell, needrestart, Pro adverts and the journald cap. Also a block of host
   defaults (`DISTRO_VER`, `DISK_STOR`, `NET_BRIDGE`, `VLAN`, `CI_SSH_KEY`,
   `CLOUD_PASSWORD`) used by every template unless its profile sets them.
@@ -91,7 +91,7 @@ a config file or profiles.
 The default arguments passed to the generic script are
 `--unattended --vmid 52000 --auto-vmid --template`.
 
-`shared.conf` holds the Gmail app password and SSH keys. It is git-ignored
+`shared.conf` holds the mail password and SSH keys. It is git-ignored
 (`*.conf`). Never commit it.
 
 ### Moving from `build-templates.conf`
@@ -109,17 +109,37 @@ repo on every run (falling back to the existing copy).
 
 ## Mail on clones
 
-Each clone relays mail through `[smtp.gmail.com]:587` using the Gmail app
-password from the config.
+Each clone sends mail through the relay chosen by `MAIL_RELAY` in
+`shared.conf`:
+
+| `MAIL_RELAY` | What it does |
+| --- | --- |
+| `gmail` (default) | `[smtp.gmail.com]:587` with `MAIL_RELAY_USER` and a Gmail app password in `MAIL_RELAY_PASSWORD`. The only one tested. |
+| `custom` | Your own relay: `MAIL_RELAY_HOST` and `MAIL_RELAY_PORT`. Port 587 uses STARTTLS (required), 465 uses TLS from the start, anything else (such as 25) uses TLS if offered. A blank `MAIL_RELAY_USER` means no login, for an internal relay. |
+| `none` | No relay. Mail stays on the clone, and anything addressed outside it bounces. |
+
+Other settings: `MAIL_ROOT_TO` (where root's mail goes; defaults to
+`MAIL_RELAY_USER` when that is an address), `MAIL_SENDER` (optional: rewrite
+every sender to this address, which some relays require) and `MAIL_DOMAIN`.
+Only the `gmail` relay has been tested; `custom` and `none` are checked by
+reading the generated config, not by sending mail. The builder refuses the
+placeholder values from `shared.conf.example`.
+
+`GMAIL_USER` and `GMAIL_APP_PASSWORD` still work as the old names for
+`MAIL_RELAY_USER` and `MAIL_RELAY_PASSWORD`, with a warning.
+
+`verify-template.sh` and `verify-clone.sh` still expect the Gmail relay, so
+for `custom` or `none` expect FAILs in their mail section until they read
+`shared.conf`.
 
 - The brackets stop MX lookups.
-- IPv4 only, TLS required, and queued mail expires after one day, so a failure
-  defers and drops instead of looping.
+- IPv4 only, TLS where the relay supports it, and queued mail expires after
+  one day, so a failure defers and drops instead of looping.
 - A per-boot script sets `/etc/mailname` and `myhostname` from the clone's own
   hostname plus `MAIL_DOMAIN`, so clones never keep the template's name.
 - Mail is sent as the natural `user@hostname.domain`. There is no sender or
-  `From:` rewrite.
-- `root` mail is aliased to `GMAIL_USER`.
+  `From:` rewrite unless `MAIL_SENDER` is set.
+- `root` mail is aliased to `MAIL_ROOT_TO`.
 - `/etc/crontab` sets `MAILTO=""`. Users' own crontabs are not changed, so add
   `MAILTO=""` to those if you do not want cron mail.
 
