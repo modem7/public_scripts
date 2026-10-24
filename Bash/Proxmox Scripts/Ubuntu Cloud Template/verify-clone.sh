@@ -379,6 +379,26 @@ guest_exec() {
     return "$rc"
 }
 
+# Best effort: list cloud-init's recoverable errors under the WARN.
+# Any failure here prints nothing and changes no exit code.
+show_recoverable_errors() {
+    local py='
+import json, subprocess
+try:
+    r = subprocess.run(["cloud-init", "status", "--format", "json"],
+                       capture_output=True, text=True, timeout=20)
+    errs = json.loads(r.stdout).get("recoverable_errors") or {}
+    for cat, msgs in errs.items():
+        for m in (msgs if isinstance(msgs, list) else [msgs]):
+            print("%s: %s" % (cat, " ".join(str(m).split())))
+except Exception:
+    pass
+'
+    guest_exec -q "$NEWID" 30 -- python3 -c "$py" 2>/dev/null \
+        && [[ -s "$WORK/out" ]] && awk '{ print "        " $0 }' "$WORK/out" >&2
+    return 0
+}
+
 # =============================================================================
 #  MAIN
 # =============================================================================
@@ -413,7 +433,8 @@ guest_exec "$NEWID" "$TIMEOUT" -- /bin/sh -c \
 rc=$?
 case "$rc" in
     0)   ;;
-    2)   warn "cloud-init reported a recoverable error: carrying on." ;;
+    2)   warn "cloud-init reported a recoverable error: carrying on."
+         show_recoverable_errors ;;
     5)   exit 5 ;;
     127) echo "cloud-init is not installed in the guest." >&2; exit 4 ;;
     *)   echo "cloud-init failed (exit $rc)." >&2; exit 4 ;;
@@ -454,7 +475,7 @@ elif [[ -n "$TEST_MAIL" ]]; then
             (( RC == 0 )) && RC=1
             break
         elif (( SECONDS >= mail_deadline )); then
-            echo -e "  ${Y}WARN${N}  no delivery result for $TEST_MAIL within ${MAIL_WAIT}s (check: journalctl -u postfix@-)"
+            echo -e "  ${Y}WARN${N}  no delivery result for $TEST_MAIL within ${MAIL_WAIT}s (check: journalctl -u postfix)"
             break
         fi
         sleep "$MAIL_POLL"
