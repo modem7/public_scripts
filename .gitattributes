@@ -1,280 +1,37 @@
-## GITATTRIBUTES FOR WEB PROJECTS
-#
-# These settings are for any web project.
-#
-# Details per file setting:
-#   text    These files should be normalized (i.e. convert CRLF to LF).
-#   binary  These files are binary and should be left untouched.
-#
-# Note that binary is a macro for -text -diff.
-######################################################################
+# Line endings: normalise text to LF in the repo and on checkout.
+* text=auto eol=lf
 
-# Auto detect
-##   Handle line endings automatically for files detected as
-##   text and leave all files detected as binary untouched.
-##   This will handle all files NOT defined below.
-*                 text eol=lf
+# Windows scripts need CRLF.
+*.cmd text eol=crlf
+*.bat text eol=crlf
+*.ps1 text eol=crlf
 
-# Source code
-*.bash            text eol=lf
-*.bat             text eol=crlf
-*.cmd             text eol=crlf
-*.coffee          text
-*.cpp             text diff=cpp
-*.cs              text diff=csharp
-*.css             text diff=css
-*.go              text diff=golang
-*.h               text diff=cpp
-*.htm             text diff=html
-*.html            text diff=html
-*.inc             text
-*.ini             text
-*.java            text diff=java
-*.js              text
-*.json            text
-*.jsx             text
-*.less            text
-*.ls              text
-*.map             text -diff
-*.od              text
-*.onlydata        text
-*.php             text diff=php
-*.pl              text
-*.ps1             text eol=crlf
-*.py              text diff=python
-*.rb              text diff=ruby
-*.rs              text diff=rust
-*.ruby            text diff=ruby
-*.sass            text
-*.scm             text
-*.scss            text diff=css
-*.sh              text diff=bash
-*.sh              text diff=bash
-*.sql             text
-*.styl            text
-*.tag             text
-*.ts              text
-*.tsx             text
-*.whl             binary
-*.xhtml           text diff=html
-*.xml             text
-.husky/*          text eol=lf
-Gemfile           text diff=ruby
+# Text types with a diff driver where git has one.
+*.py text diff=python
+*.md text diff=markdown
+*.sh text eol=lf diff=bash
+*.bats text eol=lf diff=bash
+*.yml text
+*.yaml text
+*.json text
+*.toml text
 
-# Docker
-Dockerfile        text
-
-# Documentation
-*.ipynb           text
-*.markdown        text diff=markdown
-*.md              text diff=markdown
-*.mdwn            text diff=markdown
-*.mdown           text diff=markdown
-*.mkd             text diff=markdown
-*.mkdn            text diff=markdown
-*.mdtxt           text
-*.mdtext          text
-*.txt             text
-*.wakatime-project text
-AUTHORS           text
-CHANGELOG         text
-CHANGES           text
-CONTRIBUTING      text
-COPYING           text
-copyright         text
-*COPYRIGHT*       text
-INSTALL           text
-license           text
-LICENSE           text
-NEWS              text
-readme            text
-*README*          text
-TODO              text
-
-# Templates
-*.dot             text
-*.ejs             text
-*.erb             text
-*.haml            text
-*.handlebars      text
-*.hbs             text
-*.hbt             text
-*.jade            text
-*.latte           text
-*.mustache        text
-*.njk             text
-*.phtml           text
-*.svelte          text
-*.tmpl            text
-*.tpl             text
-*.twig            text
-*.vue             text
-
-# Lock files
-*.lock            text eol=lf -diff
-package-lock.json text eol=lf -diff
-pnpm-lock.yaml    text eol=lf -diff
-yarn.lock         text eol=lf -diff
-
-# Configs
-*.cnf             text
-*.conf            text
-*.config          text
-.editorconfig     text
-.env              text
-.gitattributes    text
-.gitconfig        text
-.htaccess         text
-*.lock            text -diff
-package.json      text eol=lf
-.prettierrc       text
-yarn.lock         text -diff
-*.toml            text
-*.yaml            text
-*.yml             text
-browserslist      text
-Makefile          text
-makefile          text
-
-# Heroku
-Procfile          text
-
-# Graphics
-*.ai              binary diff=exif
-*.bmp             binary diff=exif
-*.eps             binary
-*.gif             binary diff=exif
-*.gifv            binary
-*.hqx             binary
-*.icns            binary
-*.ico             binary
-*.jng             binary
-*.jp2             binary
-*.jpeg            binary diff=exif
-*.jpg             binary diff=exif
-*.jpx             binary
-*.jxr             binary
-*.pdf             binary
-*.png             binary diff=exif
-*.psb             binary
-*.psd             binary
-*.psd             binary diff=exif
-*.svg             text
-*.svgz            binary
-*.tif             binary diff=exif
-*.tiff            binary diff=exif
-*.wbmp            binary
-*.webp            binary
-
-# Audio
-*.kar             binary diff=exif
-*.m4a             binary diff=exif
-*.mid             binary diff=exif
-*.midi            binary diff=exif
-*.mp3             binary diff=exif
-*.ogg             binary diff=exif
-*.ra              binary diff=exif
-
-# Video
-*.3gpp            binary diff=exif
-*.3gp             binary diff=exif
-*.as              binary diff=exif
-*.asf             binary diff=exif
-*.asx             binary diff=exif
-*.avi             binary diff=exif
-*.fla             binary diff=exif
-*.flv             binary diff=exif
-*.m4v             binary diff=exif
-*.mng             binary diff=exif
-*.mov             binary diff=exif
-*.mp4             binary diff=exif
-*.mpeg            binary diff=exif
-*.mpg             binary diff=exif
-*.ogv             binary diff=exif
-*.swc             binary diff=exif
-*.swf             binary diff=exif
-*.webm            binary diff=exif
-
-# Archives
-*.7z              binary
-*.cab             binary
-*.ear             binary
-*.gz              binary diff=exif
-*.jar             binary
-*.rar             binary diff=exif
-*.tar             binary
-*.tgz             binary
-*.war             binary
-*.zip             binary diff=exif
-
-# Fonts
-*.ttf             binary
-*.eot             binary
-*.otf             binary
-*.woff            binary
-*.woff2           binary
-
-# Executables
-*.exe             binary
-*.pyc             binary
-
-# RC files (like .babelrc or .eslintrc)
-*.*rc             text
-
-# Ignore files (like .npmignore or .gitignore)
-*.*ignore         text
-
-# Documents
-*.DOC             binary diff=exif
-*.DOCX            binary diff=docx
-*.DOT             binary diff=exif
-*.PDF             binary diff=exif
-*.RTF             binary diff=exif
-*.XLSX            binary diff=exif
-*.adoc            text
-*.bibtex          text diff=bibtex
-*.csv             text
-*.doc             binary diff=exif
-*.docx            binary diff=docx
-*.dot             binary diff=exif
-*.dotx            binary diff=exif
-*.epub            diff=astextplain
-*.mdx             text diff=markdown
-*.odb             binary diff=exif
-*.odf             binary diff=exif
-*.odg             binary diff=exif
-*.odi             binary diff=exif
-*.odp             binary diff=exif
-*.ods             binary diff=exif
-*.odt             binary diff=odt
-*.otc             binary diff=exif
-*.otg             binary diff=exif
-*.oti             binary diff=exif
-*.otp             binary diff=exif
-*.ots             binary diff=exif
-*.ott             binary diff=exif
-*.pdf             binary diff=exif
-*.ppt             binary diff=exif
-*.pptx            binary diff=exif
-*.ps              binary diff=exif
-*.rtf             binary diff=exif
-*.tab             text
-*.tex             text diff=tex
-*.textile         text
-*.tsv             text
-*.xls             binary diff=exif
-*.xlsx            binary diff=exif
-*.xlt             binary diff=exif
-*.xltm            binary diff=exif
-
-# Scripts
-*.fish            text eol=lf
-*.zsh             text eol=lf
-
-# Serialisation
-*.tar      binary
-*.tgz      binary
-*.zip      binary
-
-# Text files where line endings should be preserved
-*.patch    -text
+# Binary files: never convert or diff.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.webp binary
+*.pdf binary
+*.zip binary
+*.gz binary
+*.tar binary
+*.7z binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.otf binary
+*.eot binary
+*.exe binary
+*.xlsx binary
